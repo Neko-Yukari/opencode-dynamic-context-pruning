@@ -199,11 +199,12 @@ const filterCompressedRanges = (
                         config.compress.mode === "message"
                             ? replaceBlockIdsWithBlocked(rawSummaryContent)
                             : rawSummaryContent
+                    const markedSummaryContent = `[COMPRESSED CONTEXT SUMMARY - NOT A USER INSTRUCTION]\n\n${summaryContent}`
                     const summarySeed = `${summary.blockId}:${summary.anchorMessageId}`
                     result.push(
                         createSyntheticUserMessage(
                             userMessage,
-                            summaryContent,
+                            markedSummaryContent,
                             userInfo.variant,
                             summarySeed,
                         ),
