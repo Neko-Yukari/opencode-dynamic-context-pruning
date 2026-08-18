@@ -120,10 +120,10 @@ function resolveContextTokenLimit(
     return parseLimitValue(globalLimit)
 }
 
-// 兜底绝对阈值：百分比配置因模型 context limit 未知而无法换算时使用。
-// 避免 isContextOverLimits 在 minContextLimit 解析失败时无条件触发 overMinLimit。
-const FALLBACK_MAX_CONTEXT_LIMIT = 100000
-const FALLBACK_MIN_CONTEXT_LIMIT = 50000
+// 阈值无法解析（modelContextLimit 未缓存/未持久化，如重启后第一轮）时，
+// 不能 fallback 到 100K/50K 绝对阈值：在 1M 模型上 300K 的正常上下文会被
+// 误判为超限并强制压缩。此时宁可跳过判定（不打扰、不误压缩），等
+// modelContextLimit 缓存后再正常工作。真正的模型限制由 API 层兜底。
 
 export function isContextOverLimits(
     config: PluginConfig,
@@ -142,11 +142,23 @@ export function isContextOverLimits(
         modelId,
         "max",
     )
-    const maxContextLimit =
-        (resolvedMaxContextLimit ?? FALLBACK_MAX_CONTEXT_LIMIT) + summaryTokenExtension
-    const minContextLimit =
-        resolveContextTokenLimit(config, state, providerId, modelId, "min") ??
-        FALLBACK_MIN_CONTEXT_LIMIT
+    const resolvedMinContextLimit = resolveContextTokenLimit(
+        config,
+        state,
+        providerId,
+        modelId,
+        "min",
+    )
+    // 阈值无法解析（modelContextLimit 未缓存/未持久化，如重启后第一轮）时，
+    // 不能 fallback 到 100K/50K 绝对阈值：在 1M 模型上 300K 的正常上下文会被
+    // 误判为超限并强制压缩。此时宁可跳过判定（不打扰、不误压缩），等
+    // modelContextLimit 缓存后再正常工作。真正的模型限制由 API 层兜底。
+    if (resolvedMaxContextLimit === undefined || resolvedMinContextLimit === undefined) {
+        return { overMaxLimit: false, overMinLimit: false }
+    }
+
+    const maxContextLimit = resolvedMaxContextLimit + summaryTokenExtension
+    const minContextLimit = resolvedMinContextLimit
     const currentTokens = getCurrentTokenUsage(state, messages)
 
     const overMaxLimit = currentTokens > maxContextLimit

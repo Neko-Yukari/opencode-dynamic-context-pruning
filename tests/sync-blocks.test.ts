@@ -6,6 +6,10 @@ import type { CompressionBlock } from "../lib/state"
 import { syncCompressionBlocks } from "../lib/messages/sync"
 import { prune } from "../lib/messages/prune"
 import type { PluginConfig } from "../lib/config"
+import { saveSessionState, loadSessionState } from "../lib/state/persistence"
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 function msg(id: string, role: "user" | "assistant" = "user"): WithParts {
     return {
@@ -166,3 +170,38 @@ test("prune injects compressed summary into LLM context after sync keeps block a
     // 锚点消息保留
     assert.ok(messages.some((m) => m.info.id === anchorMsgId))
 })
+
+test("modelContextLimit is persisted and restored across restarts", async () => {
+    // 回归：重启后第一轮 chat.message hook 先于 system.prompt hook 运行，
+    // modelContextLimit 若未持久化则阈值解析 fallback 误触发强制压缩。
+    // STORAGE_DIR 是模块级常量（import 时已固定），因此直接走真实 storage 目录，
+    // 测试结束清理文件。
+    const sid = "ses-persist-roundtrip"
+    const filePath = join(
+        process.env.XDG_DATA_HOME || join(process.env.USERPROFILE || "", ".local", "share"),
+        "opencode", "storage", "plugin", "dcp", `${sid}.json`,
+    )
+    try {
+        const logger = new Logger(false)
+
+        const state = createSessionState()
+        state.sessionId = sid
+        state.modelContextLimit = 1000000 // 1M，如 deepseek-v4-flash
+        await saveSessionState(state, logger)
+
+        // 模拟重启：从磁盘加载（modelContextLimit 必须恢复，否则 fallback 误触发）
+        const loaded = await loadSessionState(sid, logger)
+        assert.ok(loaded !== null)
+        assert.equal(loaded.modelContextLimit, 1000000)
+
+        // 持久化文件里确实包含该字段（而非仅内存）
+        assert.equal(existsSync(filePath), true)
+        const raw = JSON.parse(readFileSync(filePath, "utf-8"))
+        assert.equal(raw.modelContextLimit, 1000000)
+    } finally {
+        if (existsSync(filePath)) {
+            rmSync(filePath, { force: true })
+        }
+    }
+})
+

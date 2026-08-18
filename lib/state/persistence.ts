@@ -34,6 +34,7 @@ export interface PersistedNudges {
 
 export interface PersistedSessionState {
     sessionName?: string
+    modelContextLimit?: number
     prune: PersistedPrune
     nudges: PersistedNudges
     stats: SessionStats
@@ -72,6 +73,11 @@ export async function saveSessionState(
 
         const state: PersistedSessionState = {
             sessionName: sessionName,
+            // modelContextLimit 必须持久化：opencode 的 system.prompt hook 在
+            // chat.message hook 之后才缓存该值，重启后第一轮 inject 时内存中
+            // 尚未缓存 → resolveContextTokenLimit 失败 → fallback 100K →
+            // 300K 上下文被误判超限（CRITICAL WARNING）被迫压缩。
+            modelContextLimit: sessionState.modelContextLimit ?? undefined,
             prune: {
                 tools: Object.fromEntries(sessionState.prune.tools),
                 messages: {

@@ -163,6 +163,13 @@ export async function ensureSessionInitialized(
         return
     }
 
+    // 重启后第一轮 chat.message hook 先于 system.prompt hook 运行，
+    // 若不恢复持久化的 modelContextLimit，阈值解析会 fallback 到 100K
+    // 导致 300K+ 的正常上下文被误判为超限并强制压缩。
+    if (persisted.modelContextLimit !== undefined) {
+        state.modelContextLimit = persisted.modelContextLimit
+    }
+
     state.prune.tools = loadPruneMap(persisted.prune.tools)
     state.prune.messages = loadPruneMessagesState(persisted.prune.messages)
     state.nudges.contextLimitAnchors = new Set<string>(persisted.nudges.contextLimitAnchors || [])

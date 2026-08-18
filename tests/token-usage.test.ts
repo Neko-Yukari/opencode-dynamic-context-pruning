@@ -301,15 +301,16 @@ test("isContextOverLimits does not extend the max threshold when summaryBuffer i
     assert.equal(overLimit.overMaxLimit, true)
 })
 
-test("isContextOverLimits falls back to absolute defaults when modelContextLimit is unknown", () => {
-    // 回归：修复前 modelContextLimit 缺失时百分比无法换算 → minContextLimit=undefined
-    // → overMinLimit 无条件 true（每轮注入 nudge）。修复后应回退 50000/100000。
+test("isContextOverLimits skips thresholds when modelContextLimit is unknown", () => {
+    // 回归：重启后第一轮 modelContextLimit 尚未缓存/持久化时，百分比无法换算。
+    // 修复前 fallback 100K/50K 会把 300K 的正常上下文（1M 模型 30%）误判为
+    // 超限并注入 CRITICAL WARNING 强制压缩。修复后应跳过判定（不误触发）。
     const messages = buildCompactedMessages()
     messages.push(buildPostCompactionAssistantMessage())
     const state = createSessionState() // modelContextLimit 保持 undefined
 
     const pctConfig = buildConfig("85%", "60%")
-    const freshReportedTotal = 2400 + 600 + 150 + 300 // ≈3.4K，远小于 fallback 50K
+    const freshReportedTotal = 2400 + 600 + 150 + 300 // ≈3.4K
 
     const underFallback = isContextOverLimits(pctConfig, state, undefined, undefined, messages)
     assert.equal(underFallback.overMinLimit, false)
@@ -318,6 +319,28 @@ test("isContextOverLimits falls back to absolute defaults when modelContextLimit
     const huge = buildCompactedMessages()
     const overloaded = isContextOverLimits(pctConfig, state, undefined, undefined, huge)
     assert.equal(overloaded.overMaxLimit, false)
+})
+
+test("isContextOverLimits does not force compression for large-but-normal context when limit is unknown", () => {
+    // 关键回归：1M 模型上 300K 上下文（30%）在 modelContextLimit 未知时
+    // 绝不能触发强制压缩警告（修复前 fallback 100K 误判，用户被迫误压缩）。
+    const messages = buildCompactedMessages()
+    messages.push(buildPostCompactionAssistantMessage())
+    const state = createSessionState()
+
+    // 模拟最后一条 assistant 报告 input≈300K（与大模型上下文规模一致）
+    const lastMsg = messages[messages.length - 1]
+    ;(lastMsg.info as any).tokens = {
+        input: 300000,
+        output: 500,
+        reasoning: 0,
+        cache: { read: 100, write: 0 },
+    }
+
+    const pctConfig = buildConfig("85%", "60%")
+    const result = isContextOverLimits(pctConfig, state, undefined, undefined, messages)
+    assert.equal(result.overMaxLimit, false)
+    assert.equal(result.overMinLimit, false)
 })
 
 test("isContextOverLimits resolves percent thresholds against modelContextLimit", () => {
