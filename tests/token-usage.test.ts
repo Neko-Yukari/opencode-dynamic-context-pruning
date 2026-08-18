@@ -7,7 +7,10 @@ import { createSessionState, type WithParts } from "../lib/state"
 import type { CompressionBlock } from "../lib/state"
 import { getCurrentTokenUsage } from "../lib/strategies/utils"
 
-function buildConfig(maxContextLimit: number, minContextLimit = 1): PluginConfig {
+function buildConfig(
+    maxContextLimit: number | `${number}%`,
+    minContextLimit: number | `${number}%` = 1,
+): PluginConfig {
     return {
         enabled: true,
         debug: false,
@@ -296,4 +299,51 @@ test("isContextOverLimits does not extend the max threshold when summaryBuffer i
     const overLimit = isContextOverLimits(config, state, undefined, undefined, messages)
 
     assert.equal(overLimit.overMaxLimit, true)
+})
+
+test("isContextOverLimits falls back to absolute defaults when modelContextLimit is unknown", () => {
+    // 回归：修复前 modelContextLimit 缺失时百分比无法换算 → minContextLimit=undefined
+    // → overMinLimit 无条件 true（每轮注入 nudge）。修复后应回退 50000/100000。
+    const messages = buildCompactedMessages()
+    messages.push(buildPostCompactionAssistantMessage())
+    const state = createSessionState() // modelContextLimit 保持 undefined
+
+    const pctConfig = buildConfig("85%", "60%")
+    const freshReportedTotal = 2400 + 600 + 150 + 300 // ≈3.4K，远小于 fallback 50K
+
+    const underFallback = isContextOverLimits(pctConfig, state, undefined, undefined, messages)
+    assert.equal(underFallback.overMinLimit, false)
+    assert.equal(underFallback.overMaxLimit, false)
+
+    const huge = buildCompactedMessages()
+    const overloaded = isContextOverLimits(pctConfig, state, undefined, undefined, huge)
+    assert.equal(overloaded.overMaxLimit, false)
+})
+
+test("isContextOverLimits resolves percent thresholds against modelContextLimit", () => {
+    const messages = buildCompactedMessages()
+    messages.push(buildPostCompactionAssistantMessage())
+    const state = createSessionState()
+    state.modelContextLimit = 1000000 // 1M（如 deepseek-v4-flash / kimi k3）
+
+    const pctConfig = buildConfig("85%", "60%")
+
+    // 小用量（≈3.4K < 600K min）→ 不触发
+    const underLimit = isContextOverLimits(pctConfig, state, undefined, undefined, messages)
+    assert.equal(underLimit.overMinLimit, false)
+    assert.equal(underLimit.overMaxLimit, false)
+
+    // 700K 用量：超过 60%×1M=600K min，但低于 85%×1M=850K max → 仅 overMinLimit
+    const base = buildPostCompactionAssistantMessage()
+    const bigMessages = buildCompactedMessages()
+    bigMessages.push({
+        ...base,
+        info: {
+            ...base.info,
+            tokens: { input: 700000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+    } as WithParts)
+    const overMinOnly = isContextOverLimits(pctConfig, state, undefined, undefined, bigMessages)
+    assert.equal(overMinOnly.overMinLimit, true)
+    assert.equal(overMinOnly.overMaxLimit, false)
 })

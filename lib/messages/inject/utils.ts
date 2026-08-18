@@ -120,6 +120,11 @@ function resolveContextTokenLimit(
     return parseLimitValue(globalLimit)
 }
 
+// 兜底绝对阈值：百分比配置因模型 context limit 未知而无法换算时使用。
+// 避免 isContextOverLimits 在 minContextLimit 解析失败时无条件触发 overMinLimit。
+const FALLBACK_MAX_CONTEXT_LIMIT = 100000
+const FALLBACK_MIN_CONTEXT_LIMIT = 50000
+
 export function isContextOverLimits(
     config: PluginConfig,
     state: SessionState,
@@ -138,14 +143,14 @@ export function isContextOverLimits(
         "max",
     )
     const maxContextLimit =
-        resolvedMaxContextLimit === undefined
-            ? undefined
-            : resolvedMaxContextLimit + summaryTokenExtension
-    const minContextLimit = resolveContextTokenLimit(config, state, providerId, modelId, "min")
+        (resolvedMaxContextLimit ?? FALLBACK_MAX_CONTEXT_LIMIT) + summaryTokenExtension
+    const minContextLimit =
+        resolveContextTokenLimit(config, state, providerId, modelId, "min") ??
+        FALLBACK_MIN_CONTEXT_LIMIT
     const currentTokens = getCurrentTokenUsage(state, messages)
 
-    const overMaxLimit = maxContextLimit === undefined ? false : currentTokens > maxContextLimit
-    const overMinLimit = minContextLimit === undefined ? true : currentTokens >= minContextLimit
+    const overMaxLimit = currentTokens > maxContextLimit
+    const overMinLimit = currentTokens >= minContextLimit
 
     return {
         overMaxLimit,
