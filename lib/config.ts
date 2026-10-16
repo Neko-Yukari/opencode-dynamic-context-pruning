@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs"
 import { join, dirname } from "path"
 import { homedir } from "os"
-import { parse } from "jsonc-parser/lib/esm/main.js"
+import * as jsonc from "jsonc-parser"
 import type { PluginInput } from "@opencode-ai/plugin"
 
 type ConfigContext = Pick<PluginInput, "directory"> & {
@@ -23,6 +23,9 @@ export interface Deduplication {
 }
 
 export interface CompressConfig {
+    model?: string
+    fallbackModels?: string[]
+    modelTimeoutMs?: number
     mode: CompressMode
     permission: Permission
     showCompression: boolean
@@ -122,6 +125,9 @@ export const VALID_CONFIG_KEYS = new Set([
     "manualMode.enabled",
     "manualMode.automaticStrategies",
     "compress",
+    "compress.model",
+    "compress.fallbackModels",
+    "compress.modelTimeoutMs",
     "compress.mode",
     "compress.permission",
     "compress.showCompression",
@@ -370,6 +376,48 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     key: "compress.mode",
                     expected: '"range" | "message"',
                     actual: JSON.stringify(compress.mode),
+                })
+            }
+
+            const modelRef = /^[^\s/#]+\/[^\s#]+(?:#[^\s#]+)?$/
+            if (compress.model !== undefined && compress.mode === "message") {
+                errors.push({
+                    key: "compress.mode",
+                    expected: "range when compress.model is set",
+                    actual: "message",
+                })
+            }
+            if (
+                compress.model !== undefined &&
+                (typeof compress.model !== "string" || !modelRef.test(compress.model))
+            ) {
+                errors.push({
+                    key: "compress.model",
+                    expected: "provider/model#variant",
+                    actual: "invalid model reference",
+                })
+            }
+            if (
+                compress.fallbackModels !== undefined &&
+                (!Array.isArray(compress.fallbackModels) ||
+                    !compress.fallbackModels.every(
+                        (model: unknown) => typeof model === "string" && modelRef.test(model),
+                    ))
+            ) {
+                errors.push({
+                    key: "compress.fallbackModels",
+                    expected: "model reference array",
+                    actual: "invalid model references",
+                })
+            }
+            if (
+                compress.modelTimeoutMs !== undefined &&
+                (!Number.isSafeInteger(compress.modelTimeoutMs) || compress.modelTimeoutMs <= 0)
+            ) {
+                errors.push({
+                    key: "compress.modelTimeoutMs",
+                    expected: "positive integer milliseconds",
+                    actual: "invalid timeout",
                 })
             }
 
@@ -801,7 +849,7 @@ function loadConfigFile(configPath: string): ConfigLoadResult {
     }
 
     try {
-        const parsed = parse(fileContent, undefined, { allowTrailingComma: true })
+        const parsed = jsonc.parse(fileContent, undefined, { allowTrailingComma: true })
         if (parsed === undefined || parsed === null) {
             return { data: null, parseError: "Config file is empty or invalid" }
         }
@@ -852,6 +900,9 @@ function mergeCompress(
 
     return {
         mode: override.mode ?? base.mode,
+        model: override.model ?? base.model,
+        fallbackModels: override.fallbackModels ?? base.fallbackModels,
+        modelTimeoutMs: override.modelTimeoutMs ?? base.modelTimeoutMs,
         permission: override.permission ?? base.permission,
         showCompression: override.showCompression ?? base.showCompression,
         summaryBuffer: override.summaryBuffer ?? base.summaryBuffer,

@@ -134,6 +134,21 @@
             "description": "Configuration for the unified compress tool",
             "additionalProperties": false,
             "properties": {
+                "model": {
+                    "type": "string",
+                    "pattern": "^[^\\s/#]+/[^\\s#]+(?:#[^\\s#]+)?$",
+                    "description": "Optional native summarizer provider/model#variant. Unset preserves main-authored range summaries. Requires range mode."
+                },
+                "fallbackModels": {
+                    "type": "array",
+                    "items": { "type": "string", "pattern": "^[^\\s/#]+/[^\\s#]+(?:#[^\\s#]+)?$" },
+                    "description": "Explicit ordered fallbacks, used only after provider errors, never cancellation, unavailable models or invalid summaries."
+                },
+                "modelTimeoutMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional inference timeout. By default derived from estimated selected input and model output budget."
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["range", "message"],

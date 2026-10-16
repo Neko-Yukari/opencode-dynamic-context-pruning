@@ -185,6 +185,41 @@ Each level overrides the previous, so project settings take priority over global
 
 </details>
 
+### Dedicated Compression Model (OpenCode V2)
+
+Set `compress.model` to let a separate native model write range summaries. The main
+model selects only a topic and range boundaries; the configured model receives
+the selected observable messages, tool inputs/results and existing blocks.
+
+```jsonc
+{
+    "compress": {
+        "mode": "range",
+        "model": "provider/model#variant",
+        // Optional, ordered fallbacks for explicitly classified provider errors:
+        "fallbackModels": [],
+        // Optional; otherwise derived from the selected input and output budget:
+        "modelTimeoutMs": 120000,
+    },
+}
+```
+
+`#variant` is optional. Use a model registered with OpenCode, with known context
+and output limits. This mode requires OpenCode 2.0.30 or later; leaving `model`
+unset preserves the existing main-authored summaries. Message mode is not supported.
+
+If the selected model advertises image input, selected images are supplied in an
+isolated, tool-free native session. Other models receive references only. Inline
+attachments are saved under
+`${XDG_DATA_HOME:-~/.local/share}/opencode/storage/plugin/dcp/media` using
+content-derived filenames. Summaries retain those paths or original URLs; Base64
+payloads are excluded from summary text and text-token estimates. Keep these files
+alongside session data when moving sessions between machines.
+
+Unknown model limits, oversized input, cancellation and invalid summaries leave
+the original context intact. No input is silently truncated. Fallbacks require
+an explicit retryable provider status; ambiguous native errors are not retried.
+
 ### Commands
 
 DCP provides a TUI panel and one prompt-producing slash command:
