@@ -35,6 +35,7 @@ import { rpc } from "./rpc"
 import { MODEL_SELECTION_INSTRUCTIONS } from "../compress/model"
 import { nativeToolSignal } from "./cancellation"
 import { createSummarizer } from "./summarizer"
+import { createReadbackTool } from "../readback"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
@@ -186,6 +187,7 @@ export async function setup(ctx: Plugin.Context) {
                 )
                 if (state.isSubAgent && !config.experimental.allowSubAgents) {
                     delete event.tools.compress
+                    delete event.tools.dcp_read
                     return
                 }
                 if (state.compressPermission === "deny") delete event.tools.compress
@@ -247,6 +249,58 @@ export async function setup(ctx: Plugin.Context) {
                 await logger.saveContext(event.sessionID, view.messages)
             }),
         )
+
+    const defineReadback = (state: SessionState) =>
+        createReadbackTool({
+            client,
+            state,
+            logger,
+            allowSubAgents: config.experimental.allowSubAgents,
+        })
+    const readback = defineReadback(createSessionState("compact"))
+    await ctx.tool.transform((editor) =>
+        editor.add({
+            name: "dcp_read",
+            description: readback.description,
+            input: tool.schema.object(readback.args),
+            options: { codemode: false, permission: "dcp_read" },
+            execute: (input, context) =>
+                serial(context.sessionID, async () => {
+                    const legacy = defineReadback(
+                        sessions.get(context.sessionID) ?? createSessionState("compact"),
+                    )
+                    const content = await legacy.execute(input, {
+                        sessionID: context.sessionID,
+                        messageID: context.messageID,
+                        agent: context.agent,
+                        directory: ctx.location.directory,
+                        worktree: ctx.location.directory,
+                        abort: nativeToolSignal(context) ?? new AbortController().signal,
+                        ask: async () => {
+                            if (!ctx.permission?.assert)
+                                throw new Error(
+                                    "DCP readback requires native permission.assert support",
+                                )
+                            await ctx.permission.assert({
+                                sessionID: context.sessionID,
+                                agent: context.agent,
+                                action: "dcp_read",
+                                resources: ["*"],
+                                source: {
+                                    type: "tool",
+                                    messageID: context.messageID,
+                                    id: context.id,
+                                },
+                            })
+                        },
+                        metadata: ({ title }: { title?: string }) => {
+                            void context.progress({ title })
+                        },
+                    })
+                    return { content: content as string }
+                }),
+        }),
+    )
 
     if (config.compress.permission !== "deny") {
         const define = (state: SessionState): ToolDefinition =>
