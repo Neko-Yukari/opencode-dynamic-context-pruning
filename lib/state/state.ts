@@ -100,6 +100,7 @@ export function createSessionState(idFormat: IdFormat = "xml"): SessionState {
         lastCompaction: 0,
         currentTurn: 0,
         modelContextLimit: undefined,
+        modelOutputLimit: undefined,
         systemPromptTokens: undefined,
     }
 }
@@ -134,6 +135,7 @@ export function resetSessionState(state: SessionState): void {
     state.lastCompaction = 0
     state.currentTurn = 0
     state.modelContextLimit = undefined
+    state.modelOutputLimit = undefined
     state.systemPromptTokens = undefined
 }
 

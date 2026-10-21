@@ -72,7 +72,7 @@ export async function setup(ctx: Plugin.Context) {
     }
     const sessions = new Map<string, SessionState>()
     const queues = new Map<string, Promise<unknown>>()
-    const limits = new Map<string, number>()
+    const limits = new Map<string, { context: number; output?: number }>()
     const aliases: Record<string, string> = {
         task: "subagent",
         bash: "shell",
@@ -176,7 +176,7 @@ export async function setup(ctx: Plugin.Context) {
     await ctx.model.transform((editor) => {
         limits.clear()
         for (const model of editor.list())
-            limits.set(`${model.providerID}/${model.id}`, model.limit.context)
+            limits.set(`${model.providerID}/${model.id}`, { context: model.limit.context, output: model.limit.output })
     })
     for (const kind of ["context", "compaction"] as const)
         await ctx.session.hook(kind, (event) =>
@@ -191,7 +191,9 @@ export async function setup(ctx: Plugin.Context) {
                     return
                 }
                 if (state.compressPermission === "deny") delete event.tools.compress
-                state.modelContextLimit = limits.get(`${event.model.providerID}/${event.model.id}`)
+                const limit = limits.get(`${event.model.providerID}/${event.model.id}`)
+                state.modelContextLimit = limit?.context
+                state.modelOutputLimit = limit?.output
                 state.systemPromptTokens = countTokens(
                     event.system.map((part) => part.text).join("\n"),
                 )

@@ -63,9 +63,13 @@ export function createSystemPromptHandler(
     prompts: PromptStore,
 ) {
     return async (
-        input: { sessionID?: string; model: { limit: { context: number } } },
+        input: { sessionID?: string; model: { limit: { context: number; output?: number } } },
         output: { system: string[] },
     ) => {
+        if (input.model?.limit?.output) {
+            state.modelOutputLimit = input.model.limit.output
+        }
+
         if (input.model?.limit?.context) {
             state.modelContextLimit = input.model.limit.context
             logger.debug("Cached model context limit", { limit: state.modelContextLimit })

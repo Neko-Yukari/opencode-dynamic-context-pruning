@@ -1,5 +1,6 @@
 import type { SessionState, WithParts } from "../../state"
 import type { PluginConfig } from "../../config"
+import { resolveContextLimit } from "../../context-limit"
 import {
     appendGuidanceToDcpTag,
     buildCompressedBlockGuidance,
@@ -91,28 +92,7 @@ function resolveContextTokenLimit(
     modelId: string | undefined,
     threshold: "max" | "min",
 ): number | undefined {
-    const parseLimitValue = (limit: number | `${number}%` | undefined): number | undefined => {
-        if (limit === undefined) {
-            return undefined
-        }
-
-        if (typeof limit === "number") {
-            return limit
-        }
-
-        if (!limit.endsWith("%") || state.modelContextLimit === undefined) {
-            return undefined
-        }
-
-        const parsedPercent = parseFloat(limit.slice(0, -1))
-        if (isNaN(parsedPercent)) {
-            return undefined
-        }
-
-        const roundedPercent = Math.round(parsedPercent)
-        const clampedPercent = Math.max(0, Math.min(100, roundedPercent))
-        return Math.round((clampedPercent / 100) * state.modelContextLimit)
-    }
+    const context = state.modelContextLimit
 
     const modelLimits =
         threshold === "max" ? config.compress.modelMaxLimits : config.compress.modelMinLimits
@@ -120,13 +100,28 @@ function resolveContextTokenLimit(
         const providerModelId = `${providerId}/${modelId}`
         const modelLimit = modelLimits[providerModelId]
         if (modelLimit !== undefined) {
-            return parseLimitValue(modelLimit)
+            return resolveContextLimit(modelLimit, context)
         }
     }
 
     const globalLimit =
         threshold === "max" ? config.compress.maxContextLimit : config.compress.minContextLimit
-    return parseLimitValue(globalLimit)
+    const resolved = resolveContextLimit(globalLimit, context)
+    // Never nudge past the window the model actually accepts.
+    return resolved === undefined || context === undefined ? resolved : Math.min(resolved, context)
+}
+
+/**
+ * Tokens that must stay free for the model's own reply. The advertised output
+ * allowance is used when the host reports it, otherwise 20% of the window; it is
+ * capped at half the window so a small context never collapses the budget.
+ */
+function resolveOutputReserve(state: SessionState): number | undefined {
+    const context = state.modelContextLimit
+    const explicit = state.modelOutputLimit
+    if (context === undefined) return explicit
+    const reserve = explicit ?? Math.round(context * 0.2)
+    return Math.max(0, Math.min(reserve, Math.round(context * 0.5)))
 }
 
 export function isContextOverLimits(
@@ -146,11 +141,23 @@ export function isContextOverLimits(
         modelId,
         "max",
     )
-    const maxContextLimit =
+    const reserve = resolveOutputReserve(state)
+    const safeBudget =
+        state.modelContextLimit !== undefined && reserve !== undefined
+            ? Math.max(0, state.modelContextLimit - reserve)
+            : undefined
+    const cappedMax =
         resolvedMaxContextLimit === undefined
             ? undefined
-            : resolvedMaxContextLimit + summaryTokenExtension
-    const minContextLimit = resolveContextTokenLimit(config, state, providerId, modelId, "min")
+            : safeBudget === undefined
+              ? resolvedMaxContextLimit
+              : Math.min(resolvedMaxContextLimit, safeBudget)
+    const maxContextLimit = cappedMax === undefined ? undefined : cappedMax + summaryTokenExtension
+    const rawMinContextLimit = resolveContextTokenLimit(config, state, providerId, modelId, "min")
+    const minContextLimit =
+        rawMinContextLimit !== undefined && maxContextLimit !== undefined
+            ? Math.min(rawMinContextLimit, maxContextLimit)
+            : rawMinContextLimit
     const currentTokens = getCurrentTokenUsage(state, messages)
 
     const overMaxLimit = maxContextLimit === undefined ? false : currentTokens > maxContextLimit

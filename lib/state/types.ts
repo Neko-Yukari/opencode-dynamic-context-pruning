@@ -110,5 +110,6 @@ export interface SessionState {
     lastCompaction: number
     currentTurn: number
     modelContextLimit: number | undefined
+    modelOutputLimit: number | undefined
     systemPromptTokens: number | undefined
 }

@@ -3,6 +3,7 @@ import { join, dirname } from "path"
 import { homedir } from "os"
 import * as jsonc from "jsonc-parser"
 import type { PluginInput } from "@opencode-ai/plugin"
+import { isValidContextLimitSpec } from "./context-limit"
 
 type ConfigContext = Pick<PluginInput, "directory"> & {
     client: {
@@ -22,6 +23,13 @@ export interface Deduplication {
     protectedTools: string[]
 }
 
+/**
+ * Context threshold. One of: tokens ("500000"), suffixed tokens ("500k", "1m"),
+ * a percentage of the model context window ("50%"), or two of those joined by "/"
+ * (for example "500k/50%"), in which case the lower resolved value wins.
+ */
+export type ContextLimitValue = number | string
+
 export interface CompressConfig {
     model?: string
     fallbackModels?: string[]
@@ -30,10 +38,10 @@ export interface CompressConfig {
     permission: Permission
     showCompression: boolean
     summaryBuffer: boolean
-    maxContextLimit: number | `${number}%`
-    minContextLimit: number | `${number}%`
-    modelMaxLimits?: Record<string, number | `${number}%`>
-    modelMinLimits?: Record<string, number | `${number}%`>
+    maxContextLimit: ContextLimitValue
+    minContextLimit: ContextLimitValue
+    modelMaxLimits?: Record<string, ContextLimitValue>
+    modelMinLimits?: Record<string, ContextLimitValue>
     nudgeFrequency: number
     iterationNudgeThreshold: number
     nudgeForce: "strong" | "soft"
@@ -517,13 +525,14 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                 value: unknown,
                 actualValue: unknown = value,
             ): void => {
-                const isValidNumber = typeof value === "number"
-                const isPercentString = typeof value === "string" && value.endsWith("%")
+                const isValidNumber = typeof value === "number" && Number.isFinite(value)
+                const isValidString =
+                    typeof value === "string" && isValidContextLimitSpec(value)
 
-                if (!isValidNumber && !isPercentString) {
+                if (!isValidNumber && !isValidString) {
                     errors.push({
                         key,
-                        expected: 'number | "${number}%"',
+                        expected: 'number | "500k" | "1m" | "50%" | "500k/50%"',
                         actual: JSON.stringify(actualValue),
                     })
                 }
@@ -739,8 +748,8 @@ const defaultConfig: PluginConfig = {
         permission: "allow",
         showCompression: false,
         summaryBuffer: true,
-        maxContextLimit: 100000,
-        minContextLimit: 50000,
+        maxContextLimit: "500k/50%",
+        minContextLimit: "250k/25%",
         nudgeFrequency: 5,
         iterationNudgeThreshold: 15,
         nudgeForce: "soft",
