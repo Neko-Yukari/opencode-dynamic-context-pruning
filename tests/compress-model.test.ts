@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getConfig, validateConfigTypes, getInvalidConfigKeys } from "../lib/config"
 import { createCompressRangeTool } from "../lib/compress/range"
-import { generateSummary, parseModel, providerFailure } from "../lib/compress/model"
+import { generateSummary, parseModel, providerFailure, summaryBudget } from "../lib/compress/model"
 import { createSessionState, type WithParts } from "../lib/state"
 import { Logger } from "../lib/logger"
 import type { ToolContext } from "../lib/compress/types"
@@ -325,6 +325,38 @@ test("timeouts do not invoke fallbacks or commit parent compression", async () =
     await assert.rejects(createCompressRangeTool(f.ctx).execute(f.args, f.run), /timeout/)
     assert.equal(calls, 1)
     assert.equal(f.ctx.state.prune.messages.blocksById.size, 0)
+})
+
+test("summary budget accrues per source segment and never decreases with length", () => {
+    assert.equal(summaryBudget(0), 1_200)
+    assert.equal(summaryBudget(1), 1_200)
+    assert.equal(summaryBudget(8_000), 1_200)
+    assert.equal(summaryBudget(20_000), 3_000)
+    assert.equal(summaryBudget(20_001), 3_000)
+    assert.equal(summaryBudget(50_000), 6_600)
+    assert.equal(summaryBudget(100_000), 12_600)
+    assert.equal(summaryBudget(100_001), 12_600)
+    assert.equal(summaryBudget(200_000), 20_600)
+    assert.equal(summaryBudget(300_000), 24_000)
+    for (const cut of [20_000, 100_000]) assert.ok(summaryBudget(cut + 1) >= summaryBudget(cut))
+    for (let size = 0; size <= 300_000; size += 500)
+        assert.ok(
+            summaryBudget(size + 1) >= summaryBudget(size),
+            `budget dropped at ${size}: ${summaryBudget(size)} -> ${summaryBudget(size + 1)}`,
+        )
+})
+
+test("generateSummary applies the accrued budget instead of a step-down ratio", async () => {
+    const budgets: number[] = []
+    const f = fixture(async (input) => {
+        budgets.push(Number(/in at most (\d+) tokens/.exec(input.prompt)![1]))
+        return output()
+    })
+    await generateSummary(f.ctx, "topic", "small source", f.abort.signal)
+    await generateSummary(f.ctx, "topic", `Evidence line. ${"x".repeat(60_000)}`, f.abort.signal)
+    assert.equal(budgets[0], 1_200)
+    assert.ok(budgets[1]! > budgets[0]!)
+    assert.ok(budgets[1]! <= 24_000)
 })
 
 test("unknown capacities and too-large source fail closed without truncating or inference", async () => {
