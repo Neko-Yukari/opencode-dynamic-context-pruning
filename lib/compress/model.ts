@@ -119,6 +119,16 @@ function estimate(text: string) {
     return Math.ceil(Math.max(countTokens(text) * 1.5, Buffer.byteLength(text, "utf8") / 3))
 }
 
+// Summary budget accrues per source segment so a longer source never gets a
+// smaller budget: 15% of the first 20k, 12% of the next 80k, 8% beyond 100k.
+export function summaryBudget(sourceTokens: number) {
+    const accrued =
+        Math.min(sourceTokens, 20_000) * 0.15 +
+        Math.min(Math.max(sourceTokens - 20_000, 0), 80_000) * 0.12 +
+        Math.max(sourceTokens - 100_000, 0) * 0.08
+    return Math.floor(Math.min(24_000, Math.max(1_200, accrued)))
+}
+
 export async function generateSummary(
     ctx: ToolContext,
     topic: string,
@@ -153,9 +163,9 @@ export async function generateSummary(
         if (model.variant && !metadata.variants?.some((item) => item.id === model.variant))
             throw new Error(`DCP summarizer variant unavailable: ${ref}`)
         const images = metadata.capabilities?.input.includes("image") ? (media?.images() ?? []) : []
-        const budget = Math.floor(
-            Math.min(metadata.limit.output * 0.5, Math.max(256, estimate(source) * 0.35)),
-        )
+        const sourceTokens = estimate(source)
+        // Apply decreasing marginal rates without reducing the accumulated budget.
+        const budget = summaryBudget(sourceTokens)
         const mediaInstructions = images.length
             ? "Attached images are selected evidence: summarize relevant visible facts, link them to their image reference, and retain uncertainty."
             : "Media references are locators only. You have not seen their contents; do not infer visual facts or claim to have inspected them."
