@@ -319,6 +319,14 @@ Unknown model limits, oversized input, cancellation and invalid summaries leave
 the original context intact. No input is silently truncated. Fallbacks require
 an explicit retryable provider status; ambiguous native errors are not retried.
 
+Malformed JSON, an invalid summary object, or a summary over its computed budget
+can trigger one correction request to the same model and variant. The correction
+uses the full selected source and images, with specific format or measured-length
+feedback; it does not include the failed reply. It shares the current model's
+timeout and rechecks input capacity. Each compression range allows at most one
+such correction across all configured fallbacks. A second invalid result leaves
+the original context intact.
+
 ### Commands
 
 DCP provides a TUI panel and one prompt-producing slash command:
