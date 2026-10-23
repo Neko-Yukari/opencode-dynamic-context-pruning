@@ -3,6 +3,48 @@ import * as imageSize from "image-size"
 import type { Plugin } from "@opencode/plugin"
 import type { ContentPart } from "@opencode/ai/schema/messages"
 import type { ToolContext } from "../compress/types"
+import { SummaryFailure } from "../compress/errors"
+
+function modelRef(model: { providerID: string; id: string; variant?: string }) {
+    return `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`.replace(
+        /\|/g,
+        "_",
+    )
+}
+
+type ContextMessage = { readonly role: string; readonly content: ReadonlyArray<ContentPart> }
+
+// Retries and RecoverFull rebuild the same request until an assistant reply has
+// output; the failed empty assistant is dropped, so the rendered context must
+// match the first attempt exactly. Continuations append an assistant or synthetic
+// user turn and therefore differ here. Media is compared by real inline mime and
+// base64: stringifying the Asset class would serialize empty objects.
+function contextBaseline(messages: ReadonlyArray<ContextMessage>): string[] {
+    return messages.map((message) =>
+        JSON.stringify([
+            message.role,
+            ...message.content.map((part) => {
+                if (part.type === "text") return ["text", part.text]
+                if (part.type === "media") {
+                    const inline = part.media.inline()
+                    if (!inline)
+                        throw new Error(
+                            "DCP image dimensions unavailable; original context retained",
+                        )
+                    return ["media", inline.mime, inline.base64]
+                }
+                return [part.type]
+            }),
+        ]),
+    )
+}
+
+function sameContext(baseline: string[], current: string[]) {
+    return (
+        baseline.length === current.length &&
+        baseline.every((message, index) => message === current[index])
+    )
+}
 
 // generate.text is text-only. Let the host decode attachments in an isolated,
 // tool-free session; constructing Media.Asset here crosses the host's class boundary.
@@ -12,6 +54,8 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
         generate: async (input, signal) => {
             if (!input.images?.length) return ctx.generate.text(input, { signal })
             signal.throwIfAborted()
+            const budget = input.imageBudget
+            if (!budget) throw new Error("DCP image summarizer requires the internal image budget")
             const marker = `DCP_MEDIA_${randomUUID()}`
             const session = await ctx.session.create(
                 {
@@ -22,7 +66,9 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                 { signal },
             )
             let calls = 0
+            let baseline: string[] | undefined
             let imageTokens = 0
+            let failure: SummaryFailure | undefined
             let registration: { dispose(): Promise<void> } | undefined
             let interrupted: Promise<unknown> | undefined
             const abort = () => {
@@ -35,13 +81,27 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                 registration = await ctx.session.hook("context", (event) => {
                     if (event.sessionID !== session.id) return
                     if (
-                        ++calls !== 1 ||
                         event.model.providerID !== input.model.providerID ||
                         event.model.id !== input.model.id ||
                         (input.model.variant !== undefined &&
                             event.model.variant !== input.model.variant)
-                    )
-                        throw new Error("DCP isolated summarizer model or request count changed")
+                    ) {
+                        failure = new SummaryFailure(
+                            "model_mismatch",
+                            `expected=${modelRef(input.model)} actual=${modelRef(event.model)}; original context retained; do not write a summary yourself`,
+                        )
+                        throw failure
+                    }
+                    calls += 1
+                    const current = contextBaseline(event.messages)
+                    if (baseline === undefined) baseline = current
+                    else if (!sameContext(baseline, current)) {
+                        failure = new SummaryFailure(
+                            "unexpected_turn",
+                            `calls=${calls} request content changed; original context retained; do not write a summary yourself`,
+                        )
+                        throw failure
+                    }
                     const images = event.messages
                         .filter(
                             (message) =>
@@ -56,13 +116,30 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                     if (images.length !== input.images!.length)
                         throw new Error("DCP native session did not load selected images")
                     imageTokens = estimateImageTokens(images)
-                    if (
-                        !Number.isFinite(input.imageTokenLimit) ||
-                        imageTokens > input.imageTokenLimit!
+                    // The host may delete maxTokens (its own provider contract) and may
+                    // also cap output because reasoning shares that window. Without a
+                    // numeric cap, reserve the full model output and add no field; with
+                    // one, keep the smallest of cap, model limit and remaining window.
+                    const hostLimit = event.options.maxTokens
+                    const remaining = budget.context - budget.input - imageTokens
+                    const outputLimit = Math.min(
+                        budget.output,
+                        hostLimit ?? budget.output,
+                        remaining,
                     )
-                        throw new Error(
-                            "DCP images exceed safe context budget; original context retained",
+                    if (
+                        !Number.isSafeInteger(outputLimit) ||
+                        outputLimit < budget.summary ||
+                        (hostLimit === undefined && remaining < budget.output)
+                    ) {
+                        failure = new SummaryFailure(
+                            "image_budget",
+                            `text=${budget.input} image=${imageTokens} summaryOutputReserve=${budget.summary} safeLimit=${budget.context}; select a smaller closed range and retry; original context retained; do not write a summary yourself`,
                         )
+                        throw failure
+                    }
+                    if (hostLimit !== undefined)
+                        event.options = { ...event.options, maxTokens: outputLimit }
                     event.system = []
                     event.tools = {}
                     event.messages = [
@@ -82,41 +159,54 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                     ]
                 })
                 signal.throwIfAborted()
-                await ctx.session.prompt(
-                    {
-                        sessionID: session.id,
-                        text: marker,
-                        files: input.images.map((image) => ({
-                            uri: image.uri,
-                            description: image.ref,
-                        })),
-                        resume: true,
-                    },
-                    { signal },
-                )
-                await ctx.session.wait({ sessionID: session.id }, { signal })
-                signal.throwIfAborted()
-                const entries = await ctx.session.context({ sessionID: session.id }, { signal })
-                const assistants = entries.filter((entry) => entry.type === "assistant")
-                const text = assistants
-                    .flatMap((entry) =>
-                        entry.content
-                            .filter((part) => part.type === "text")
-                            .map((part) => part.text),
+                try {
+                    await ctx.session.prompt(
+                        {
+                            sessionID: session.id,
+                            text: marker,
+                            files: input.images.map((image) => ({
+                                uri: image.uri,
+                                description: image.ref,
+                            })),
+                            resume: true,
+                        },
+                        { signal },
                     )
-                    .join("")
-                if (
-                    calls !== 1 ||
-                    !text.trim() ||
-                    assistants.some((entry) =>
-                        entry.content.some((part) => part.type === "tool"),
-                    ) ||
-                    entries.some((entry) => entry.type === "idle" && entry.outcome !== "succeeded")
-                )
-                    throw new Error(
-                        "DCP native image summarizer did not complete a tool-free response",
+                    await ctx.session.wait({ sessionID: session.id }, { signal })
+                    signal.throwIfAborted()
+                    const entries = await ctx.session.context({ sessionID: session.id }, { signal })
+                    const assistants = entries.filter((entry) => entry.type === "assistant")
+                    // A failed attempt leaves an assistant without parts; only the last
+                    // assistant that actually has body text is the summary response.
+                    const response = assistants
+                        .filter((entry) =>
+                            entry.content.some((part) => part.type === "text" && part.text.trim()),
+                        )
+                        .at(-1)
+                    const text = (response?.content ?? [])
+                        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                        .join("")
+                    if (
+                        calls < 1 ||
+                        !response ||
+                        assistants.some((entry) =>
+                            entry.content.some((part) => part.type === "tool"),
+                        ) ||
+                        entries.some(
+                            (entry) => entry.type === "idle" && entry.outcome !== "succeeded",
+                        )
                     )
-                return { text, imageTokens }
+                        throw new Error(
+                            "DCP native image summarizer did not complete a tool-free response",
+                        )
+                    return { text, imageTokens }
+                } catch (error) {
+                    // The host may report a hook failure later as a generic session
+                    // error; keep our own guarded diagnostic instead.
+                    if (signal.aborted) throw signal.reason
+                    if (failure) throw failure
+                    throw error
+                }
             } finally {
                 signal.removeEventListener("abort", abort)
                 try {

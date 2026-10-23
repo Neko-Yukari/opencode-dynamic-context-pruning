@@ -9,6 +9,14 @@ export interface SummaryImage {
     uri: string
 }
 
+// Budget the image path enforces once the host has loaded the real media parts.
+export interface SummaryImageBudget {
+    context: number
+    input: number
+    output: number
+    summary: number
+}
+
 export interface ToolContext {
     client: any
     state: SessionState
@@ -21,7 +29,7 @@ export interface ToolContext {
                 prompt: string
                 model: { providerID: string; id: string; variant?: string }
                 images?: SummaryImage[]
-                imageTokenLimit?: number
+                imageBudget?: SummaryImageBudget
             },
             signal: AbortSignal,
         ): Promise<{ text: string; imageTokens?: number }>
