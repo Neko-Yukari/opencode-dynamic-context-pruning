@@ -6,7 +6,7 @@ import { systemPrompt } from "./system"
 import { rangePrompt } from "./compress-range"
 import { messagePrompt } from "./compress-message"
 import type { IdFormat } from "../message-ids"
-import { CONTEXT_LIMIT_NUDGE } from "./context-limit-nudge"
+import { CONTEXT_LIMIT_NUDGE, MODEL_SELECTION_CONTEXT_LIMIT_NUDGE } from "./context-limit-nudge"
 import { TURN_NUDGE } from "./turn-nudge"
 import { ITERATION_NUDGE } from "./iteration-nudge"
 import { MANUAL_MODE_SYSTEM_EXTENSION, SUBAGENT_SYSTEM_EXTENSION } from "./extensions/system"
@@ -124,12 +124,17 @@ const DCP_SYSTEM_REMINDER_TAG_REGEX =
     /^\s*<dcp-system-reminder\b[^>]*>[\s\S]*<\/dcp-system-reminder>\s*$/i
 const DEFAULTS_README_FILE = "README.md"
 
-function bundledPrompts(format: IdFormat): Record<EditablePromptField, string> {
+function bundledPrompts(
+    format: IdFormat,
+    configuredModel: boolean,
+): Record<EditablePromptField, string> {
     return {
         system: systemPrompt(format),
         compressRange: rangePrompt(format),
         compressMessage: messagePrompt(format),
-        contextLimitNudge: CONTEXT_LIMIT_NUDGE,
+        contextLimitNudge: configuredModel
+            ? MODEL_SELECTION_CONTEXT_LIMIT_NUDGE
+            : CONTEXT_LIMIT_NUDGE,
         turnNudge: TURN_NUDGE,
         iterationNudge: ITERATION_NUDGE,
     }
@@ -331,11 +336,14 @@ export class PromptStore {
         workingDirectory: string,
         customPromptsEnabled = false,
         idFormat: IdFormat = "xml",
+        // Selects the default nudge for the configured-summarizer contract. A user
+        // override still wins: this only changes the bundled default.
+        configuredModel = false,
     ) {
         this.logger = logger
         this.paths = resolvePromptPaths(workingDirectory)
         this.customPromptsEnabled = customPromptsEnabled
-        this.bundled = bundledPrompts(idFormat)
+        this.bundled = bundledPrompts(idFormat, configuredModel)
         this.runtimePrompts = createBundledRuntimePrompts(this.bundled)
 
         if (this.customPromptsEnabled) {

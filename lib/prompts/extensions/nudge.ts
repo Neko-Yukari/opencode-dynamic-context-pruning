@@ -1,7 +1,7 @@
 import type { SessionState } from "../../state"
 import { formatBlockRef } from "../../message-ids"
 
-export function buildCompressedBlockGuidance(state: SessionState): string {
+export function buildCompressedBlockGuidance(state: SessionState, configured = false): string {
     const refs = Array.from(state.prune.messages.activeBlockIds)
         .filter((id) => Number.isInteger(id) && id > 0)
         .sort((a, b) => a - b)
@@ -12,7 +12,9 @@ export function buildCompressedBlockGuidance(state: SessionState): string {
     return [
         "Compressed block context:",
         `- Active compressed blocks in this session: ${blockCount} (${blockList})`,
-        `- If your selected compression range includes any listed block, include each required placeholder exactly once in the summary using \`${state.idFormat === "compact" ? "@b1@" : "(bN)"}\`.`,
+        configured
+            ? "- Existing blocks listed above are preserved by the configured summarizer when a selected range includes them; you do not insert or pass placeholder text."
+            : `- If your selected compression range includes any listed block, include each required placeholder exactly once in the summary using \`${state.idFormat === "compact" ? "@b1@" : "(bN)"}\`.`,
     ].join("\n")
 }
 

@@ -65,8 +65,11 @@ export async function setup(ctx: Plugin.Context) {
         ctx.location.directory,
         config.experimental.customPrompts,
         "compact",
+        config.compress.model !== undefined,
     )
     if (config.compress.model !== undefined) {
+        // The tool contract differs, so the system prompt is replaced outright.
+        // The context-limit nudge stays a PromptStore default so user overrides win.
         const original = prompts.getRuntimePrompts.bind(prompts)
         prompts.getRuntimePrompts = () => ({ ...original(), system: MODEL_SELECTION_INSTRUCTIONS })
     }

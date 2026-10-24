@@ -28,15 +28,28 @@ const COMPRESS_TRIGGER_PROMPT = [
     "Return after compress with a brief explanation of what content was compressed.",
 ].join("\n\n")
 
+const MODEL_SELECTION_COMPRESS_TRIGGER_PROMPT = [
+    "<compress triggered manually>",
+    "Manual mode trigger received. Select older, genuinely finished closed ranges for the compress tool.",
+    "Pass only topic and content: [{ startId, endId }] using observed IDs; the configured summarizer writes the summary, so do not write or pass one yourself.",
+    "Skip active or unresolved work, messages still waiting on a user answer, raw output needed for exact verification, and this trigger. If no safely closed range exists, continue without compressing and explain why.",
+    "Return after compress with a brief explanation of what content was compressed.",
+].join("\n\n")
+
 function getTriggerPrompt(
     tool: "compress",
     state: SessionState,
     config: PluginConfig,
     userFocus?: string,
 ): string {
-    const base = COMPRESS_TRIGGER_PROMPT
+    const base =
+        config.compress.model !== undefined
+            ? MODEL_SELECTION_COMPRESS_TRIGGER_PROMPT
+            : COMPRESS_TRIGGER_PROMPT
     const compressedBlockGuidance =
-        config.compress.mode === "message" ? "" : buildCompressedBlockGuidance(state)
+        config.compress.mode === "message"
+            ? ""
+            : buildCompressedBlockGuidance(state, config.compress.model !== undefined)
 
     const sections = [base, compressedBlockGuidance]
     if (userFocus && userFocus.trim().length > 0) {

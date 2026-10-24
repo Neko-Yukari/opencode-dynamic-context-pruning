@@ -359,7 +359,10 @@ export function applyAnchoredNudges(
         return
     }
 
-    const compressedBlockGuidance = buildCompressedBlockGuidance(state)
+    const compressedBlockGuidance = buildCompressedBlockGuidance(
+        state,
+        config.compress.model !== undefined,
+    )
     applyRangeModeAnchoredNudge(
         state.nudges.contextLimitAnchors,
         messages,
