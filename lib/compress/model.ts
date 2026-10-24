@@ -82,7 +82,7 @@ export function selectedSource(
     return { text: JSON.stringify(redact(media.transform({ messages, blocks }))), media }
 }
 
-export const MODEL_SELECTION_INSTRUCTIONS = `Compress only closed, completed ranges. Select topic and startId/endId boundaries; do NOT write or pass a summary. The explicitly configured native model reads only the selected original observable text/tool inputs and results and relevant existing compressed blocks, and authors the summaries. Do not compress active work, unresolved requests, or the current compression call. On failure retain original context and report the diagnostic; do not substitute a main-authored summary.`
+export const MODEL_SELECTION_INSTRUCTIONS = `For context reduction, use the compress tool when context pressure warrants it or substantial completed history can be released. A prose recap in chat does not replace context or free space; do not use one instead of compress. User-requested summaries are unaffected. Compress only closed, completed ranges. A completed subtask can be compressed while the broader task continues, provided its original details are no longer needed for exact verification. Select topic and startId/endId boundaries; do NOT write or pass a summary. The explicitly configured native model reads only the selected original observable text/tool inputs and results and relevant existing compressed blocks, and authors the summaries. Do not compress active work, unresolved requests, or the current compression call. On failure retain original context and report the diagnostic; do not substitute a main-authored summary.`
 
 export function providerFailure(error: unknown): boolean {
     if (!error || typeof error !== "object") return false

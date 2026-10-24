@@ -5,6 +5,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { handleManualTriggerCommand, type ManualCommandContext } from "../lib/commands/manual"
 import type { PluginConfig } from "../lib/config"
+import { MODEL_SELECTION_INSTRUCTIONS } from "../lib/compress/model"
+import { createCompressRangeTool } from "../lib/compress/range"
+import type { ToolContext } from "../lib/compress/types"
 import { Logger } from "../lib/logger"
 import { injectCompressNudges } from "../lib/messages/inject/inject"
 import {
@@ -83,6 +86,25 @@ test("configured default nudge keeps the summary with the summarizer", () => {
     assert.match(runtime.contextLimitNudge, /Do not write or pass a summary yourself/)
     assert.match(runtime.contextLimitNudge, /startId, endId/)
     assert.match(runtime.contextLimitNudge, /do not substitute a summary of your own/)
+    assert.match(runtime.contextLimitNudge, /Finish the current atomic step first/)
+    assert.match(
+        runtime.contextLimitNudge,
+        /if a safely closed range exists, you MUST call the compress tool/,
+    )
+    assert.match(
+        runtime.contextLimitNudge,
+        /before continuing normal exploration or implementation/,
+    )
+    assert.match(
+        runtime.contextLimitNudge,
+        /If no safely closed range exists, continue useful work/,
+    )
+    assert.match(runtime.contextLimitNudge, /do not wait for the entire task to finish/)
+    assert.match(
+        runtime.contextLimitNudge,
+        /a prose recap in chat does not replace the compress tool/,
+    )
+    assert.match(runtime.contextLimitNudge, /User-requested summaries are unaffected/)
     assert.doesNotMatch(runtime.contextLimitNudge, /Your summary MUST cover/)
     assert.doesNotMatch(runtime.contextLimitNudge, /You MUST use the .compress. tool now/)
 })
@@ -96,7 +118,31 @@ test("configured default reaches the real context-limit injection", () => {
     const injected = JSON.stringify(messages)
     assert.match(injected, /COMPRESS AT A SAFE BOUNDARY/)
     assert.match(injected, /preserved by the configured summarizer/)
+    assert.match(injected, /you MUST call the compress tool before continuing/)
+    assert.match(injected, /A completed subtask can be compressed while the broader task continues/)
+    assert.match(injected, /If no safely closed range exists, continue useful work/)
     assert.doesNotMatch(injected, /include each required placeholder exactly once/)
+})
+
+test("configured tool shares the context-reduction contract without accepting an authored summary", () => {
+    const ctx = {
+        ...sessionFixture(true),
+        prompts: store(false, true),
+    } as unknown as ToolContext
+    const tool = createCompressRangeTool(ctx)
+
+    assert.equal(tool.description, MODEL_SELECTION_INSTRUCTIONS)
+    assert.match(tool.description, /For context reduction, use the compress tool/)
+    assert.match(tool.description, /A prose recap in chat does not replace context or free space/)
+    assert.match(
+        tool.description,
+        /A completed subtask can be compressed while the broader task continues/,
+    )
+    assert.match(tool.description, /User-requested summaries are unaffected/)
+    assert.match(tool.description, /Do not compress active work, unresolved requests/)
+    assert.match(tool.description, /On failure retain original context/)
+    assert.equal(tool.args.content.safeParse([{ startId: "@1@", endId: "@2@" }]).success, true)
+    assert.equal("summary" in tool.args.content.element.shape, false)
 })
 
 test("a user context-limit override still wins in configured mode and survives reload", () => {

@@ -21,7 +21,7 @@ export const MODEL_SELECTION_CONTEXT_LIMIT_NUDGE = `
 <dcp-system-reminder>
 CONTEXT LIMIT REACHED — COMPRESS AT A SAFE BOUNDARY
 
-You are at or beyond the configured max context threshold. Recover space by compressing older, genuinely finished history once you reach a safe boundary. Finish the current atomic step first instead of abandoning it.
+You are at or beyond the configured max context threshold. Finish the current atomic step first. At that safe boundary, if a safely closed range exists, you MUST call the compress tool before continuing normal exploration or implementation.
 
 COMPRESS TOOL CONTRACT
 Call \`compress\` with only \`topic\` and \`content: [{ startId, endId }]\` using observed message or block IDs.
@@ -29,8 +29,10 @@ The configured summarizer model writes the summary. Do not write or pass a summa
 
 SELECTION PROCESS
 Start from older, resolved history that is truly complete and has no remaining raw-fidelity dependency.
+A completed subtask can be compressed while the broader task continues; do not wait for the entire task to finish.
 Do not compress active or unresolved work, messages still waiting on a user answer, raw output needed for exact verification, or this compress call.
 If no safely closed range exists, continue useful work without forcing compression, and do not repeat compress attempts on the same range.
+For context reduction, a prose recap in chat does not replace the compress tool or free context space. User-requested summaries are unaffected.
 
 ON FAILURE
 If compression fails, the original context is retained. Report the diagnostic; do not substitute a summary of your own.
