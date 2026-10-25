@@ -81,6 +81,27 @@ test("inline image examples in source text are preserved when their base64 is no
     )
 })
 
+test("image URLs and file paths embedded in text remain references rather than attachments", () => {
+    const media = new CompressionMedia()
+    const remote = "https://example.com/documentation.jpg"
+    const file = "file:///C:/missing-documentation-example.png"
+    const source = media.transform({
+        text: `Example:\n${JSON.stringify({ type: "image_url", image_url: { url: remote } })}`,
+        output: JSON.stringify({ type: "image", mimeType: "image/png", url: file }),
+    })
+    assert.deepEqual(media.images(), [])
+    assert.match(JSON.stringify(source), /documentation\.jpg/)
+    assert.match(JSON.stringify(source), /missing-documentation-example\.png/)
+    const summary = media.appendReferences("Documented input formats.", false)
+    assert.match(summary, /reference-only; visual contents were not inspected/)
+    assert.ok(summary.includes(remote))
+    assert.ok(summary.includes(file))
+
+    // A real attachment using the same locator must still be loaded normally.
+    media.transform({ type: "file", uri: file, mime: "image/png" })
+    assert.deepEqual(media.images(), [{ ref: file, uri: file, mime: "image/png" }])
+})
+
 test("image sources pass an internal budget instead of a full output reserve", async () => {
     const bytes = Buffer.alloc(33)
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)

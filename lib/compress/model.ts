@@ -15,7 +15,7 @@ export function redact(value: unknown): unknown {
     if (typeof value === "string")
         return value
             .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, "$1 [REDACTED]")
-            .replace(/\b(?:sk-|sk_)[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+            .replace(/\b(?:sk-|sk_)[A-Za-z0-9_-]+\b/g, "[REDACTED]")
             .replace(
                 /((?:api[_-]?key|(?:access|refresh|id)[_-]?token|password|secret|credential)["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;]+)/gi,
                 '$1"[REDACTED]"',
@@ -130,16 +130,17 @@ export function summaryBudget(sourceTokens: number) {
     return Math.floor(Math.min(24_000, Math.max(1_200, accrued)))
 }
 
-// Report only labels and numeric status. Provider messages and bodies may carry
-// request credentials, so they never reach a caller.
+// Keep diagnostic identity and redact credentials from the original message.
 function safeErrorIdentity(error: unknown): string {
     const tagged = (error ?? {}) as {
         _tag?: unknown
         name?: unknown
         status?: unknown
         statusCode?: unknown
+        type?: unknown
+        code?: unknown
     }
-    const labels = [tagged._tag, tagged.name].filter(
+    const labels = [tagged._tag, tagged.name, tagged.type, tagged.code].filter(
         (value): value is string =>
             typeof value === "string" && value !== "Error" && /^[\w.:-]{1,40}$/.test(value),
     )
@@ -304,9 +305,13 @@ export async function generateSummary(
                         throw new Error(
                             `DCP compression blocked for ${ref} [${error.kind}]: ${error.safe}`,
                         )
-                    // Provider errors may contain request credentials. Never echo their raw body.
+                    const detail =
+                        error && typeof error === "object" && "message" in error
+                            ? String(error.message)
+                            : String(error)
                     throw new Error(
-                        `DCP summarizer request failed for ${ref}${safeErrorIdentity(error)}; original context retained`,
+                        `DCP summarizer request failed for ${ref}${safeErrorIdentity(error)}: ${redact(detail)}; original context retained`,
+                        { cause: error },
                     )
                 }
                 signal.throwIfAborted()

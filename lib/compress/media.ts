@@ -17,15 +17,18 @@ const extensions: Record<string, string> = {
 }
 
 export class CompressionMedia {
-    private assets = new Map<string, SummaryImage & { bytes?: Buffer }>()
+    private assets = new Map<string, SummaryImage & { bytes?: Buffer; referenceOnly: boolean }>()
 
     transform(value: unknown): unknown {
         return mapMedia(value, (source) => this.reference(source))
     }
 
-    private reference({ uri, mime }: MediaSource): string {
+    private reference({ uri, mime, embedded }: MediaSource): string {
         const previous = this.assets.get(uri)
-        if (previous) return previous.ref
+        if (previous) {
+            if (!embedded) previous.referenceOnly = false
+            return previous.ref
+        }
         let ref = uri
         let bytes: Buffer | undefined
         if (/^data:/i.test(uri)) {
@@ -52,13 +55,16 @@ export class CompressionMedia {
         }
         if (!ref)
             throw new Error("DCP media has no retrievable reference; original context retained")
-        this.assets.set(uri, { ref, mime, uri, bytes })
+        // Text can quote documentation URLs or obsolete paths. Only carried inline
+        // bytes or actual attachment parts supply images for inference.
+        this.assets.set(uri, { ref, mime, uri, bytes, referenceOnly: embedded === true && !bytes })
         return ref
     }
 
     images(): SummaryImage[] {
         return [...new Map([...this.assets.values()].map((asset) => [asset.ref, asset])).values()]
             .filter((asset) => {
+                if (asset.referenceOnly) return false
                 if (!asset.mime.startsWith("image/")) return false
                 if (!asset.bytes) return true
                 // Logs can contain test data labelled as an image. The host loads

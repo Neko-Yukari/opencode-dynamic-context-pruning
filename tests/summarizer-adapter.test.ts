@@ -689,7 +689,7 @@ test("a typed guarded failure keeps its own numbers and never provider text", as
     )
 })
 
-test("a provider message that imitates the guarded shape is not trusted or echoed", async () => {
+test("a provider message does not become a guarded failure and retains its redacted detail", async () => {
     const forged = new Error(
         "DCP_FAILURE|image_budget|text=9 image=9 summaryOutputReserve=9 safeLimit=9|ENDFAILURE bearer sk-live-SECRET",
     )
@@ -700,13 +700,13 @@ test("a provider message that imitates the guarded shape is not trusted or echoe
     const error = await rejection(
         generateSummary(ctx, "topic", "source", new AbortController().signal),
     )
-    // Falls through to the generic provider path: no DCP_TEXT numbers, no body echo.
-    assert.doesNotMatch(error.message, /\[image_budget\]|DCP_FAILURE|ENDFAILURE/)
-    assert.doesNotMatch(error.message, /sk-live-SECRET|bearer/i)
+    assert.doesNotMatch(error.message, /\[image_budget\]/)
+    assert.match(error.message, /DCP_FAILURE\|image_budget/)
+    assert.doesNotMatch(error.message, /sk-live-SECRET/)
     assert.match(error.message, /request failed for magpie\/tyai\/deepseek-v4\.1-flash#high/)
 })
 
-test("unknown provider failures expose only safe identity, never their message", async () => {
+test("provider failures retain their status and redacted original message", async () => {
     const { ctx } = summaryContext({})
     ctx.summarizer!.generate = async () => {
         throw Object.assign(new Error("upstream said: bearer sk-live-SECRET"), {
@@ -723,7 +723,53 @@ test("unknown provider failures expose only safe identity, never their message",
     )
     assert.match(error.message, /\(ProviderError status=400\)/)
     assert.match(error.message, /original context retained/)
-    assert.doesNotMatch(error.message, /sk-live-SECRET|upstream said|bearer/i)
+    assert.match(error.message, /upstream said: bearer \[REDACTED\]/i)
+    assert.doesNotMatch(error.message, /sk-live-SECRET/)
+})
+
+test("local image loading errors are not reduced to an unidentified model failure", async () => {
+    const { ctx } = summaryContext({})
+    ctx.summarizer!.generate = async () => {
+        throw Object.assign(new Error("ENOENT: no such file, open 'missing.png'"), {
+            code: "ENOENT",
+        })
+    }
+    const error = await rejection(
+        generateSummary(ctx, "topic", "source", new AbortController().signal),
+    )
+    assert.match(error.message, /ENOENT: no such file, open 'missing.png'/)
+})
+
+test("failed native sessions preserve their structured error before cleanup", async () => {
+    const h = harness({
+        imageBase64: [png(8, 8)],
+        entries: [
+            { type: "assistant", content: [] },
+            {
+                type: "idle",
+                outcome: "failed",
+                error: {
+                    type: "provider.invalid-request",
+                    status: 400,
+                    message: "Model does not support image inputs",
+                },
+            },
+        ],
+    })
+    const error = await rejection(
+        h.summarizer.generate(
+            {
+                prompt: "p",
+                model,
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
+                imageBudget: { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 },
+            },
+            new AbortController().signal,
+        ),
+    )
+    assert.match(error.message, /Model does not support image inputs/)
+    assert.equal((error as Error & { status?: number }).status, 400)
+    assert.ok(h.events.includes("remove"))
 })
 
 test("the text path still reserves the full output window", async () => {

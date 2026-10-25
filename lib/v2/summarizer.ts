@@ -218,6 +218,11 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                     await ctx.session.wait({ sessionID: session.id }, { signal })
                     signal.throwIfAborted()
                     const entries = await ctx.session.context({ sessionID: session.id }, { signal })
+                    const failed = entries.findLast(
+                        (entry) => entry.type === "idle" && entry.outcome === "failed",
+                    )
+                    if (failed?.type === "idle" && failed.error)
+                        throw Object.assign(new Error(failed.error.message), failed.error)
                     const assistants = entries.filter((entry) => entry.type === "assistant")
                     // A failed attempt leaves an assistant without parts; only the last
                     // assistant that actually has body text is the summary response.

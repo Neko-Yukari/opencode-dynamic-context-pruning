@@ -1,6 +1,7 @@
 export interface MediaSource {
     uri: string
     mime: string
+    embedded?: boolean
 }
 
 function mapJson(text: string, reference: (source: MediaSource) => string): string | undefined {
@@ -14,7 +15,7 @@ function mapJson(text: string, reference: (source: MediaSource) => string): stri
     let changed = false
     const mapped = mapMedia(parsed, (source) => {
         changed = true
-        return reference(source)
+        return reference({ ...source, embedded: true })
     })
     return changed ? JSON.stringify(mapped) : text
 }
