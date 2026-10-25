@@ -337,7 +337,7 @@ export async function setup(ctx: Plugin.Context) {
             editor.add({
                 name: "dcp_note",
                 description:
-                    "Read the current session's note workspace or commit its edited Markdown draft. Read returns a fixed file path for the existing read, grep, edit and patch tools. Write commits that draft to the session database and confirms review, including when unchanged. Commit before compress or dcp_release; uncommitted edits are not protected. Suggested size: about 8,000 characters, no hard limit. Parent and child sessions have separate notes.",
+                    "Prepare the current session's continuation checkpoint before context reduction. The committed note is already included in context; normal work needs no note I/O. Read returns a fixed Markdown draft path for existing file tools. Write commits the reviewed draft, including when unchanged, before compress or dcp_release. Keep only facts needed after removal of the selected history. Successful commits or reductions need no follow-up note entry. About 8,000 characters is guidance, not a target or hard limit. Parent and child notes are separate.",
                 input: tool.schema.object({ action: tool.schema.enum(["read", "write"]) }).strict(),
                 options: { codemode: false, permission: "compress" },
                 execute: (input, context) =>

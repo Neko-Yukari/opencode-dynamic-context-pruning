@@ -160,13 +160,13 @@ test("a second validation failure stops after two calls", async () => {
         [
             '{"summary":"truncated',
             JSON.stringify({ summary: "word ".repeat(4_000), complete: true }),
-            /empty, incomplete, or oversized/,
+            /summary exceeds output budget/,
         ],
         ['{"summary":"value","complete":false}', "not json", /malformed or truncated JSON/],
         [
             '{"summary":"value","complete":false}',
             '{"summary":"value","complete":false}',
-            /empty, incomplete, or oversized/,
+            /did not match the required summary object/,
         ],
     ] as const) {
         const replies = [first, second]
@@ -185,6 +185,31 @@ test("a valid first reply makes no correction call", async () => {
     assert.equal(summary, "Fixed summary with constraints and open work.")
     assert.equal(calls.length, 1)
     assert.doesNotMatch(calls[0]!.prompt, /CORRECTION/)
+})
+
+test("final output rejection distinguishes budget overflow from an invalid object", async () => {
+    const oversized = "word ".repeat(4_000)
+    const tooLong = fixture({
+        respond: () => ({ text: JSON.stringify({ summary: oversized, complete: true }) }),
+    })
+    const overflow = await rejection(
+        generateSummary(tooLong.ctx, "Topic", source, new AbortController().signal),
+    )
+    assert.match(overflow.message, /summary exceeds output budget/)
+    assert.match(overflow.message, new RegExp(`estimate=${estimateOf(oversized)}`))
+    assert.match(overflow.message, new RegExp(`limit=${budgetOf}`))
+    assert.match(overflow.message, /original context retained/)
+    assert.equal(tooLong.calls.length, 2)
+
+    const invalid = fixture({
+        respond: () => ({ text: '{"summary":"value","complete":false}' }),
+    })
+    const schema = await rejection(
+        generateSummary(invalid.ctx, "Topic", source, new AbortController().signal),
+    )
+    assert.match(schema.message, /did not match the required summary object/)
+    assert.doesNotMatch(schema.message, /oversized|exceeds output budget/)
+    assert.equal(invalid.calls.length, 2)
 })
 
 test("the correction re-estimates the image input budget and keeps images and model", async () => {

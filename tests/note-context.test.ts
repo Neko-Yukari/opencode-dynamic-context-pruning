@@ -37,6 +37,61 @@ test("a note review survives note editing and consecutive context reduction", ()
     assert.equal(key([user, ...edits]), original)
 })
 
+test("reporting subagent status does not invalidate a committed note review", () => {
+    const original = key([user])
+    assert.equal(
+        key([
+            user,
+            assistant("session_status_set", { text: "Ready for compression", kind: "working" }),
+            assistant("session_status_clear", {}),
+        ]),
+        original,
+    )
+    assert.notEqual(key([user, assistant("peer_inbox", {}, "New dependency evidence")]), original)
+    assert.notEqual(
+        key([
+            user,
+            {
+                ...assistant("session_status_set", { text: "Ready", kind: "working" }),
+                content: [
+                    ...assistant("session_status_set", { text: "Ready" }).content,
+                    ...assistant("read", { path: "source.ts" }, "Changed source").content,
+                ],
+            },
+        ]),
+        original,
+    )
+})
+
+test("Code Mode status reports preserve review but mixed calls and unknown execution do not", () => {
+    const original = key([user])
+    const execute = (calls?: unknown[]) => ({
+        id: "msg_execute_status",
+        type: "assistant",
+        content: [
+            {
+                type: "tool",
+                id: "call_execute_status",
+                name: "execute",
+                state: {
+                    status: "completed",
+                    input: { code: "await reportStatus()" },
+                    content: [{ type: "text", text: "Status reported" }],
+                    ...(calls ? { metadata: { toolCalls: calls } } : {}),
+                },
+            },
+        ],
+    })
+    const status = { tool: "session_status_set", status: "completed", input: { text: "Ready" } }
+    assert.equal(key([user, execute([status])]), original)
+    assert.notEqual(
+        key([user, execute([status, { tool: "peer_inbox", status: "completed" }])]),
+        original,
+    )
+    assert.notEqual(key([user, execute()]), original)
+    assert.notEqual(key([user, execute([])]), original)
+})
+
 test("new instructions, recalled evidence and work results invalidate the review", () => {
     const original = key([user])
     for (const change of [

@@ -263,12 +263,12 @@ export function createNotes(storage: NotesStorage, directory: string): Notes {
         const note = await get(id)
         if (note === undefined) {
             throw new Error(
-                "DCP note review is required: this session has no stored note. Read the note, update it, and commit before compressing or releasing messages.",
+                "DCP note review is required before this context reduction: this session has no stored note. Prepare a concise continuation checkpoint and commit once; unchanged or empty content is allowed when sufficient. Normal work does not require note maintenance.",
             )
         }
         if (note.reviewKey !== reviewKey) {
             throw new Error(
-                "DCP note review is stale: the note has not been committed since the latest durable activity. Read the note, update it, and commit before compressing or releasing messages.",
+                "DCP note review is stale for this context reduction. Review the protected note and commit once, editing only facts needed after the selected history is removed. Unchanged content is allowed; normal work does not require note maintenance.",
             )
         }
         const actual = await readText(pathsFor(id).draft)

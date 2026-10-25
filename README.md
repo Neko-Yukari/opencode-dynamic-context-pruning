@@ -67,6 +67,8 @@ V2 keeps one formal note per session in the session database and a fixed per-ses
 
 A commit is accepted even when the draft is unchanged and still records the review. The note is an agent-maintained work record, not a replacement summary, and it has no hard size limit; about 8,000 characters is suggested.
 
+The committed note is already included in context. Normal work needs no note reads or writes. Prepare one concise continuation checkpoint when reducing context, keeping only facts needed after the selected history is removed. Omit transcripts, routine progress and context-management bookkeeping. No follow-up note entry or status report is needed solely to record a successful note commit, compression or release. Use the shortest sufficient note; the suggested size is not a target.
+
 `compress` and `dcp_release` require a commit from the current review. New user instructions, recalled evidence such as `dcp_read` results, and new work results invalidate the review; editing the note and consecutive compression or release calls do not. Uncommitted draft edits block both tools, so read, update and commit the note before reducing context further.
 
 Only the committed note enters context. It is injected in a protected user-role data message outside the prunable history, never as a system instruction, and grants no authority; current user instructions and verified evidence take precedence. Each session has its own note and draft, including each parent and child session.
@@ -100,7 +102,7 @@ Released regions stay omitted, and old block references stop working after compa
 
 ### Read original details
 
-The model can call `dcp_read` when a summary lacks details needed for its current task. `dcp_read` reads the full observable history of the current session, including released ranges and messages from before native compaction:
+The model can call `dcp_read` for a specific historical detail missing from its current context and needed for its task. It does not need to routinely reload history or verify the already injected session note. `dcp_read` reads the full observable history of the current session, including released ranges and messages from before native compaction:
 
 ```json
 { "startId": "@b2@", "maxChars": 12000 }
@@ -376,6 +378,12 @@ attachments are saved under
 content-derived filenames. Summaries retain those paths or original URLs; Base64
 payloads are excluded from summary text and text-token estimates. Keep these files
 alongside session data when moving sessions between machines.
+
+Original image bytes enter only the transient inference request. The isolated
+session stores a fixed tiny placeholder, avoiding large session/SSE events. Image
+collections above OpenCode 2.1's 25 MiB inline request limit are rejected before
+admission so the host cannot silently omit selected images. Select a smaller closed
+range when that limit is reached; original images and context are retained.
 
 Unknown model limits, oversized input, cancellation and invalid summaries leave
 the original context intact. No input is silently truncated. Fallbacks require

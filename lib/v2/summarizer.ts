@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto"
+import { readFile } from "node:fs/promises"
 import * as imageSize from "image-size"
 import type { Plugin } from "@opencode/plugin"
+import type { Media } from "@opencode/ai/media"
 import type { ContentPart } from "@opencode/ai/schema/messages"
 import type { ToolContext } from "../compress/types"
 import { SummaryFailure } from "../compress/errors"
@@ -46,8 +48,15 @@ function sameContext(baseline: string[], current: string[]) {
     )
 }
 
-// generate.text is text-only. Let the host decode attachments in an isolated,
-// tool-free session; constructing Media.Asset here crosses the host's class boundary.
+// session.prompt materializes even file: attachments before persisting and
+// broadcasting them. Admit only this 1px seed to obtain the host's Asset class;
+// original images are attached exclusively to the transient inference request.
+const seedImage =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+// OpenCode 2.1 trims inline images above this request total after context hooks.
+// Reject first so a summary cannot claim to have inspected silently removed images.
+const hostImageBytesLimit = 25 * 1024 * 1024
+
 export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["summarizer"]> {
     return {
         models: async (signal) => (await ctx.model.list(undefined, { signal })).data,
@@ -56,6 +65,34 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
             signal.throwIfAborted()
             const budget = input.imageBudget
             if (!budget) throw new Error("DCP image summarizer requires the internal image budget")
+            const sources = await Promise.all(
+                input.images.map(async (image) => {
+                    // Inline originals were saved by CompressionMedia. Preserve the
+                    // host attachment contract for other sources: file: URIs only.
+                    if (!/^data:/i.test(image.uri) && !/^file:/i.test(image.uri))
+                        throw new Error("DCP image source must be inline or a file URI")
+                    const data = await readFile(
+                        /^data:/i.test(image.uri) ? image.ref : new URL(image.uri),
+                        { signal },
+                    )
+                    const detected =
+                        image.mime === "image/*" ? imageSize.imageSize(data).type : undefined
+                    const mediaType = detected
+                        ? `image/${detected === "jpg" ? "jpeg" : detected === "svg" ? "svg+xml" : detected}`
+                        : image.mime
+                    return { source: { type: "bytes" as const, data, mediaType } }
+                }),
+            )
+            const imageBytes = sources.reduce(
+                (total, asset) => total + Math.ceil(asset.source.data.byteLength / 3) * 4,
+                0,
+            )
+            if (imageBytes > hostImageBytesLimit)
+                throw new SummaryFailure(
+                    "image_budget",
+                    `imageBytes=${imageBytes} safeLimit=${hostImageBytesLimit}; select a smaller closed range and retry; original context retained; do not write a summary yourself`,
+                )
+            signal.throwIfAborted()
             const marker = `DCP_MEDIA_${randomUUID()}`
             const session = await ctx.session.create(
                 {
@@ -102,7 +139,7 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                         )
                         throw failure
                     }
-                    const images = event.messages
+                    const seeds = event.messages
                         .filter(
                             (message) =>
                                 message.role === "user" &&
@@ -113,8 +150,17 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                         .flatMap((message) =>
                             message.content.filter((part) => part.type === "media"),
                         )
-                    if (images.length !== input.images!.length)
-                        throw new Error("DCP native session did not load selected images")
+                    if (seeds.length !== 1)
+                        throw new Error("DCP native session did not load the image seed")
+                    // Importing another copy of @opencode/ai fails the host's
+                    // instanceof schema. Use its supplied instance's public constructor.
+                    const Asset = seeds[0]!.media.constructor as new (
+                        input: Media.Asset.Input,
+                    ) => Media.Asset
+                    const images: ContentPart[] = sources.map((source) => ({
+                        type: "media",
+                        media: new Asset(source),
+                    }))
                     imageTokens = estimateImageTokens(images)
                     // The host may delete maxTokens (its own provider contract) and may
                     // also cap output because reasoning shares that window. Without a
@@ -164,10 +210,7 @@ export function createSummarizer(ctx: Plugin.Context): NonNullable<ToolContext["
                         {
                             sessionID: session.id,
                             text: marker,
-                            files: input.images.map((image) => ({
-                                uri: image.uri,
-                                description: image.ref,
-                            })),
+                            files: [{ uri: seedImage, description: "DCP inference image seed" }],
                             resume: true,
                         },
                         { signal },

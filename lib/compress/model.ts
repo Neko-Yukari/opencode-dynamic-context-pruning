@@ -178,11 +178,13 @@ function parseSummaryResponse(text: string, budget: number): SummaryOutcome {
     return { ok: true, summary: value.summary }
 }
 
-function outputFailure(failure: Exclude<SummaryOutcome, { ok: true }>) {
+function outputFailure(failure: Exclude<SummaryOutcome, { ok: true }>, budget: number) {
     return new Error(
         failure.kind === "malformed"
             ? "DCP summarizer returned malformed or truncated JSON; original context retained"
-            : "DCP summarizer returned empty, incomplete, or oversized summary; original context retained",
+            : failure.kind === "oversized"
+              ? `DCP summary exceeds output budget: conservative estimate=${failure.estimate}, limit=${budget}; original context retained`
+              : "DCP summarizer did not match the required summary object: expected only a nonempty summary string and complete=true; original context retained",
     )
 }
 
@@ -320,7 +322,7 @@ export async function generateSummary(
                     const summary = redact(outcome.summary.trim()) as string
                     return media?.appendReferences(summary, images.length > 0) ?? summary
                 }
-                if (corrected) throw outputFailure(outcome)
+                if (corrected) throw outputFailure(outcome, budget)
                 corrected = true
                 prompt = promptFor(correctionPrompt(outcome, budget))
                 inputTokens = estimate(prompt)

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
 import test, { after } from "node:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
+import { Media } from "@opencode/ai/media"
 import type { Plugin } from "@opencode/plugin"
 import { createSummarizer, estimateImageTokens } from "../lib/v2/summarizer"
 import { SummaryFailure } from "../lib/compress/errors"
@@ -13,6 +15,10 @@ import type { ToolContext } from "../lib/compress/types"
 const dataHome = mkdtempSync(join(tmpdir(), "dcp-adapter-tests-"))
 process.env.XDG_DATA_HOME = dataHome
 after(() => rmSync(dataHome, { recursive: true, force: true }))
+
+// Saved media references are absolute paths; only the inference hook reads them.
+const fixtureImage = join(dataHome, "media", "fixture.png")
+const fixtureURI = "data:image/png;base64,fixture"
 
 const model = { providerID: "magpie", id: "tyai/deepseek-v4.1-flash", variant: "high" }
 
@@ -51,9 +57,14 @@ function harness(options: {
     }
 }) {
     const events: string[] = []
+    if (options.imageBase64.length) {
+        mkdirSync(join(fixtureImage, ".."), { recursive: true })
+        writeFileSync(fixtureImage, Buffer.from(options.imageBase64[0]!, "base64"))
+    }
     let hook: ((event: any) => void) | undefined
     let current: any
     let marker = ""
+    let promptFiles: Array<{ uri: string; description?: string }> | undefined
     const session = {
         id: "ses_isolated_summary",
         create: async () => {
@@ -68,17 +79,22 @@ function harness(options: {
                 },
             }
         },
-        prompt: async (input: { text: string }) => {
+        prompt: async (input: {
+            text: string
+            files?: Array<{ uri: string; description?: string }>
+        }) => {
             events.push("prompt")
             marker = input.text
+            promptFiles = input.files
             for (let turn = 0; turn < (options.turns ?? 1); turn++) {
                 const retry = turn === 0 ? undefined : options.retry
-                const imageBase64 = retry?.imageBase64 ?? options.imageBase64
+                const imageBase64 =
+                    retry?.imageBase64 ?? input.files?.map((file) => file.uri.split(",")[1]!) ?? []
                 const content: Array<Record<string, unknown>> = [
                     { type: "text", text: retry?.text ?? marker },
                     ...imageBase64.map((base64) => ({
                         type: "media",
-                        media: { inline: () => ({ base64, mime: "image/png", dataUrl: "" }) },
+                        media: Media.base64(base64, "image/png"),
                     })),
                 ]
                 const messages: Array<Record<string, unknown>> = [{ role: "user", content }]
@@ -137,7 +153,13 @@ function harness(options: {
         },
         logger: { info() {} },
     } as unknown as Plugin.Context
-    return { summarizer: createSummarizer(ctx), ctx, events, lastEvent: () => current }
+    return {
+        summarizer: createSummarizer(ctx),
+        ctx,
+        events,
+        lastEvent: () => current,
+        promptFiles: () => promptFiles,
+    }
 }
 
 async function rejection(promise: Promise<unknown>): Promise<Error> {
@@ -162,7 +184,7 @@ test("real host case: 60k output reserve no longer blocks one small image", asyn
         {
             prompt: "summarize",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: budget,
         },
         new AbortController().signal,
@@ -192,7 +214,7 @@ test("output limit never exceeds the host cap and keeps its other options", asyn
         {
             prompt: "summarize",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: { context: 838_860, input: 100_000, output: 384_000, summary: 24_000 },
         },
         new AbortController().signal,
@@ -210,7 +232,7 @@ test("a host cap below the summary reserve rejects instead of shrinking it", asy
             {
                 prompt: "p",
                 model,
-                images: [{ ref: "r", mime: "image/png", uri: "u" }],
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
                 imageBudget: { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 },
             },
             new AbortController().signal,
@@ -229,7 +251,7 @@ test("a missing host cap keeps the field removed and reserves the full output", 
         {
             prompt: "p",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: { context: 838_860, input: 100_000, output: 32_000, summary: 1_200 },
         },
         new AbortController().signal,
@@ -247,7 +269,7 @@ test("a missing host cap rejects when the full output no longer fits", async () 
             {
                 prompt: "p",
                 model,
-                images: [{ ref: "r", mime: "image/png", uri: "u" }],
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
                 imageBudget: { context: 51_200, input: 30_000, output: 60_000, summary: 1_200 },
             },
             new AbortController().signal,
@@ -267,7 +289,7 @@ test("budget rejection reports text, image, reserve and safe limit with an actio
             {
                 prompt: "summarize",
                 model,
-                images: [{ ref: "r", mime: "image/png", uri: "u" }],
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
                 imageBudget: { context: 838_860, input: 800_000, output: 384_000, summary: 24_000 },
             },
             new AbortController().signal,
@@ -289,7 +311,7 @@ test("budget rejection reports text, image, reserve and safe limit with an actio
 
 test("model mismatch reports separately from a changed retry", async () => {
     const budget: Budget = { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 }
-    const images = [{ ref: "r", mime: "image/png", uri: "u" }]
+    const images = [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }]
     const mismatch = harness({
         imageBase64: [png(8, 8)],
         eventModel: { ...model, id: "other-model" },
@@ -329,7 +351,7 @@ test("a retry that replays the same request is accepted", async () => {
         {
             prompt: "p",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: { context: 51_200, input: 630, output: 60_000, summary: 1_200 },
         },
         new AbortController().signal,
@@ -340,7 +362,7 @@ test("a retry that replays the same request is accepted", async () => {
 
 test("a retry with any changed message is rejected", async () => {
     const budget: Budget = { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 }
-    const images = [{ ref: "r", mime: "image/png", uri: "u" }]
+    const images = [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }]
     for (const retry of [
         { imageBase64: [png(16, 16)] },
         { text: "different prompt" },
@@ -377,7 +399,7 @@ test("an empty failed assistant is not mistaken for the summary response", async
         {
             prompt: "p",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: { context: 51_200, input: 630, output: 60_000, summary: 1_200 },
         },
         new AbortController().signal,
@@ -396,7 +418,7 @@ test("an empty failed assistant is not mistaken for the summary response", async
             {
                 prompt: "p",
                 model,
-                images: [{ ref: "r", mime: "image/png", uri: "u" }],
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
                 imageBudget: { context: 51_200, input: 630, output: 60_000, summary: 1_200 },
             },
             new AbortController().signal,
@@ -416,7 +438,7 @@ test("a guarded failure survives the host reporting it through a generic wait er
             {
                 prompt: "p",
                 model,
-                images: [{ ref: "r", mime: "image/png", uri: "u" }],
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
                 imageBudget: { context: 100_000, input: 90_000, output: 32_000, summary: 1_200 },
             },
             new AbortController().signal,
@@ -433,12 +455,109 @@ test("the isolated session is cleaned up and the main session is never written",
         {
             prompt: "p",
             model,
-            images: [{ ref: "r", mime: "image/png", uri: "u" }],
+            images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
             imageBudget: { context: 51_200, input: 630, output: 60_000, summary: 1_200 },
         },
         new AbortController().signal,
     )
     assert.deepEqual(h.events, ["create", "prompt", "wait", "interrupt", "dispose", "remove"])
+})
+
+test("seven original images enter inference through native assets, with only a tiny placeholder persisted", async () => {
+    const base64s = Array.from({ length: 7 }, (_, index) => png(8 + index, 9))
+    const media = new CompressionMedia()
+    media.transform({
+        messages: [
+            {
+                id: "m1",
+                role: "user",
+                content: base64s.map((base64) => ({
+                    type: "file",
+                    uri: `data:image/png;base64,${base64}`,
+                    mime: "image/png",
+                })),
+            },
+        ],
+        blocks: [],
+    })
+    await media.save()
+    const images = media.images()
+    assert.equal(images.length, 7)
+
+    const h = harness({ imageBase64: base64s, hostOptions: { maxTokens: 60_000 } })
+    await h.summarizer.generate(
+        {
+            prompt: "p",
+            model,
+            images,
+            imageBudget: { context: 51_200, input: 630, output: 60_000, summary: 1_200 },
+        },
+        new AbortController().signal,
+    )
+
+    // Even file: locators are inlined by session.prompt. Only a fixed tiny seed
+    // may enter that boundary; the seven originals belong solely to inference.
+    const files = h.promptFiles()
+    assert.equal(files?.length, 1)
+    assert.ok(JSON.stringify(files).length < 512)
+    for (const image of images) {
+        assert.equal(
+            createHash("sha256").update(readFileSync(image.ref)).digest("hex"),
+            basename(image.ref).split(".")[0],
+        )
+    }
+
+    // The locator still delivers every selected image, in order and unchanged.
+    const loaded = h
+        .lastEvent()
+        .messages[0].content.filter((part: { type: string }) => part.type === "media")
+    assert.equal(loaded.length, 7)
+    assert.deepEqual(
+        loaded.map((part: any) => part.media.inline().base64),
+        base64s,
+    )
+    assert.ok(loaded.every((part: any) => part.media instanceof Media.Asset))
+    assert.deepEqual(h.events, ["create", "prompt", "wait", "interrupt", "dispose", "remove"])
+})
+
+test("an image collection that the host would trim is rejected before session admission", async () => {
+    const h = harness({ imageBase64: [png(8, 8)] })
+    writeFileSync(
+        fixtureImage,
+        Buffer.concat([Buffer.from(png(8, 8), "base64"), Buffer.alloc(20 * 1024 * 1024)]),
+    )
+    const error = await rejection(
+        h.summarizer.generate(
+            {
+                prompt: "p",
+                model,
+                images: [{ ref: fixtureImage, mime: "image/png", uri: fixtureURI }],
+                imageBudget: { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 },
+            },
+            new AbortController().signal,
+        ),
+    )
+    assert.equal(failureOf(error)?.kind, "image_budget")
+    assert.match(error.message, /imageBytes=\d+ safeLimit=26214400/)
+    assert.match(error.message, /original context retained/)
+    assert.deepEqual(h.events, [])
+})
+
+test("a wildcard image MIME is resolved from the original payload", async () => {
+    const h = harness({ imageBase64: [png(8, 8)] })
+    await h.summarizer.generate(
+        {
+            prompt: "p",
+            model,
+            images: [{ ref: fixtureImage, mime: "image/*", uri: fixtureURI }],
+            imageBudget: { context: 200_000, input: 1_000, output: 32_000, summary: 1_200 },
+        },
+        new AbortController().signal,
+    )
+    const media = h
+        .lastEvent()
+        .messages[0].content.find((part: { type: string }) => part.type === "media").media
+    assert.equal(media.mediaType, "image/png")
 })
 
 test("text-only input keeps the native text path with no image budget", async () => {
