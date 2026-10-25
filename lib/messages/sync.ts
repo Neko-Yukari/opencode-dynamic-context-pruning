@@ -18,7 +18,7 @@ export const syncCompressionBlocks = (
     messages: WithParts[],
 ): void => {
     const messagesState = state.prune.messages
-    if (!messagesState?.blocksById?.size) {
+    if (messagesState.blocksById.size === 0) {
         return
     }
 
@@ -37,10 +37,7 @@ export const syncCompressionBlocks = (
     const orderedBlocks = Array.from(messagesState.blocksById.values()).sort(sortBlocksByCreation)
 
     for (const block of orderedBlocks) {
-        const hasOriginMessage =
-            typeof block.compressMessageId === "string" &&
-            block.compressMessageId.length > 0 &&
-            messageIds.has(block.compressMessageId)
+        const hasOriginMessage = messageIds.has(block.compressMessageId)
 
         if (!hasOriginMessage) {
             block.active = false
@@ -91,9 +88,7 @@ export const syncCompressionBlocks = (
     }
 
     for (const entry of messagesState.byMessageId.values()) {
-        const allBlockIds = Array.isArray(entry.allBlockIds)
-            ? [...new Set(entry.allBlockIds.filter((id) => Number.isInteger(id) && id > 0))]
-            : []
+        const allBlockIds = [...new Set(entry.allBlockIds)]
 
         entry.allBlockIds = allBlockIds
         entry.activeBlockIds = allBlockIds.filter((id) => messagesState.activeBlockIds.has(id))

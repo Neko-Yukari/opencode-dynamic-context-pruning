@@ -15,20 +15,6 @@ type PermissionRule = {
     action: PermissionAction
 }
 
-const findLastMatchingRule = (
-    rules: PermissionRule[],
-    predicate: (rule: PermissionRule) => boolean,
-): PermissionRule | undefined => {
-    for (let index = rules.length - 1; index >= 0; index -= 1) {
-        const rule = rules[index]
-        if (rule && predicate(rule)) {
-            return rule
-        }
-    }
-
-    return undefined
-}
-
 const wildcardMatch = (value: string, pattern: string): boolean => {
     const normalizedValue = value.replaceAll("\\", "/")
     let escaped = pattern
@@ -69,7 +55,7 @@ const getPermissionRules = (permissionConfigs: PermissionConfig[]): PermissionRu
 }
 
 export const compressDisabledByOpencode = (...permissionConfigs: PermissionConfig[]): boolean => {
-    const match = findLastMatchingRule(getPermissionRules(permissionConfigs), (rule) =>
+    const match = getPermissionRules(permissionConfigs).findLast((rule) =>
         wildcardMatch("compress", rule.permission),
     )
 
@@ -97,5 +83,5 @@ export const hasExplicitToolPermission = (
     permissionConfig: PermissionConfig,
     tool: string,
 ): boolean => {
-    return permissionConfig ? Object.prototype.hasOwnProperty.call(permissionConfig, tool) : false
+    return permissionConfig ? Object.hasOwn(permissionConfig, tool) : false
 }

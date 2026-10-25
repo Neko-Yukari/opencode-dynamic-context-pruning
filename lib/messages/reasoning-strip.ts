@@ -1,3 +1,4 @@
+import type { UserMessage } from "@opencode-ai/sdk/v2"
 import type { WithParts } from "../state"
 import { getLastUserMessage } from "./query"
 
@@ -8,12 +9,13 @@ import { getLastUserMessage } from "./query"
  */
 export function stripStaleMetadata(messages: WithParts[]): void {
     const lastUserMessage = getLastUserMessage(messages)
-    if (lastUserMessage?.info.role !== "user") {
+    if (!lastUserMessage) {
         return
     }
 
-    const modelID = lastUserMessage.info.model.modelID
-    const providerID = lastUserMessage.info.model.providerID
+    const lastUserInfo = lastUserMessage.info as UserMessage
+    const modelID = lastUserInfo.model.modelID
+    const providerID = lastUserInfo.model.providerID
 
     messages.forEach((message) => {
         if (message.info.role !== "assistant") {

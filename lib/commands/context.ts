@@ -130,13 +130,12 @@ export function analyzeContextTokens(state: SessionState, messages: WithParts[])
 
     for (const msg of messages) {
         allMessageIds.add(msg.info.id)
-        const parts = Array.isArray(msg.parts) ? msg.parts : []
         const isCompacted = isMessageCompacted(state, msg)
         const pruneEntry = state.prune.messages.byMessageId.get(msg.info.id)
         const isMessagePruned = !!pruneEntry && pruneEntry.activeBlockIds.length > 0
         const isIgnoredUser = isIgnoredUserMessage(msg)
 
-        for (const part of parts) {
+        for (const part of msg.parts) {
             if (part.type === "tool") {
                 const toolPart = part as ToolPart
                 if (toolPart.callID) {

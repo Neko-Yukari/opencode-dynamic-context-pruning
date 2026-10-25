@@ -76,7 +76,7 @@ export function mapMedia(value: unknown, reference: (source: MediaSource) => str
                     bytes.toString("base64").replace(/=+$/, "") !== data.replace(/=+$/, "")
                 )
                     return uri
-                return reference({ uri, mime: mime.toLowerCase() })
+                return reference({ uri, mime: mime.toLowerCase(), embedded: true })
             },
         )
     }

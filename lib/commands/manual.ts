@@ -100,7 +100,7 @@ export async function handleManualTriggerCommand(
     ctx: ManualCommandContext,
     tool: "compress",
     userFocus?: string,
-): Promise<string | null> {
+): Promise<string> {
     return getTriggerPrompt(tool, ctx.state, ctx.config, userFocus)
 }
 

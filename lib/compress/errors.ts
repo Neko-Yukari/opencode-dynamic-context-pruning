@@ -2,7 +2,7 @@
 // class survives even when the host reports the failure later as a generic session
 // error. Nothing here is recovered by parsing provider text, so a provider message
 // that mimics this shape can never be mistaken for a guarded failure.
-export type SummaryFailureKind = "image_budget" | "model_mismatch" | "unexpected_turn"
+export type SummaryFailureKind = "image_budget"
 
 export class SummaryFailure extends Error {
     readonly kind: SummaryFailureKind

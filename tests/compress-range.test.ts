@@ -383,3 +383,77 @@ test("compress range mode rejects overlapping batched ranges", async () => {
 
     assert.equal(state.prune.messages.blocksById.size, 0)
 })
+
+test("configured summaries strip old block markers without consuming unselected blocks", async () => {
+    const sessionID = `ses_range_old_marker_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const state = createSessionState()
+    const config = buildConfig()
+    const ctx = {
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({ data: { parentID: null } }),
+            },
+        },
+        state,
+        logger: new Logger(false),
+        config,
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressRange: "", compressMessage: "" }
+            },
+        },
+    }
+    const toolCtx = {
+        ask: async () => {},
+        metadata: () => {},
+        sessionID,
+        messageID: "msg-compress-old-marker",
+        abort: new AbortController().signal,
+    }
+    await createCompressRangeTool(ctx as any).execute(
+        {
+            topic: "Unrelated history",
+            content: [{ startId: "m0003", endId: "m0003", summary: "UNSELECTED_BODY_91" }],
+        },
+        toolCtx,
+    )
+    const oldBlock = structuredClone(state.prune.messages.blocksById.get(1))
+    config.compress.model = "test/model"
+    let calls = 0
+    const tool = createCompressRangeTool({
+        ...ctx,
+        summarizer: {
+            models: async () => [
+                { providerID: "test", id: "model", limit: { context: 200_000, output: 32_000 } },
+            ],
+            generate: async ({ prompt }: { prompt: string }) => {
+                calls++
+                assert.doesNotMatch(prompt, /UNSELECTED_BODY_91/)
+                return {
+                    text: "Selected findings retained. Legacy markers (b1) and {block_91}.",
+                }
+            },
+        },
+    } as any)
+
+    const result = await tool.execute(
+        {
+            topic: "Selected findings",
+            content: [{ startId: "m0001", endId: "m0002" }],
+        },
+        { ...toolCtx, messageID: "msg-compress-selected" },
+    )
+
+    assert.equal(result, "Compressed 2 messages into [Compressed conversation section].")
+    assert.equal(calls, 1)
+    assert.deepEqual(state.prune.messages.blocksById.get(1), oldBlock)
+    const summary = state.prune.messages.blocksById.get(2)!
+    assert.match(summary.summary, /Selected findings retained/)
+    assert.doesNotMatch(summary.summary, /\(b1\)|\{block_91\}|UNSELECTED_BODY_91/)
+    assert.deepEqual(summary.consumedBlockIds, [])
+    assert.deepEqual(summary.effectiveMessageIds, ["msg-subagent-prompt", "msg-assistant-1"])
+    assert.deepEqual(state.prune.messages.byMessageId.get("msg-user-2")?.activeBlockIds, [1])
+})

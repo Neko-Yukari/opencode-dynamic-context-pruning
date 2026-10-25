@@ -68,17 +68,11 @@ export function getCurrentParams(
 }
 
 export function countTokens(text: string): number {
-    if (!text) return 0
     text = mediaTokenText(text)
-    try {
-        return anthropicCountTokens(text)
-    } catch {
-        return Math.round(text.length / 4)
-    }
+    return anthropicCountTokens(text)
 }
 
 export function estimateTokensBatch(texts: string[]): number {
-    if (texts.length === 0) return 0
     return countTokens(texts.join(" "))
 }
 
@@ -141,26 +135,22 @@ export function getTotalToolTokens(state: SessionState, toolIds: string[]): numb
 
 export function countMessageTextTokens(msg: WithParts): number {
     const texts: string[] = []
-    const parts = Array.isArray(msg.parts) ? msg.parts : []
-    for (const part of parts) {
+    for (const part of msg.parts) {
         if (part.type === "text") {
             texts.push(part.text)
         }
     }
-    if (texts.length === 0) return 0
     return estimateTokensBatch(texts)
 }
 
 export function countAllMessageTokens(msg: WithParts): number {
-    const parts = Array.isArray(msg.parts) ? msg.parts : []
     const texts: string[] = []
-    for (const part of parts) {
+    for (const part of msg.parts) {
         if (part.type === "text") {
             texts.push(part.text)
         } else {
             texts.push(...extractToolContent(part))
         }
     }
-    if (texts.length === 0) return 0
     return estimateTokensBatch(texts)
 }

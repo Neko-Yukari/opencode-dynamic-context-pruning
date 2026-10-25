@@ -102,7 +102,7 @@ function escapeXmlAttribute(value: string): string {
 
 export function formatMessageIdTag(
     ref: string,
-    attributes?: Record<string, string | undefined>,
+    attributes?: Record<string, string>,
     format: IdFormat = "xml",
 ): string {
     if (format === "compact") {
@@ -112,13 +112,7 @@ export function formatMessageIdTag(
     }
     const serializedAttributes = Object.entries(attributes || {})
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([name, value]) => {
-            if (name.trim().length === 0 || typeof value !== "string" || value.length === 0) {
-                return ""
-            }
-
-            return ` ${name}="${escapeXmlAttribute(value)}"`
-        })
+        .map(([name, value]) => ` ${name}="${escapeXmlAttribute(value)}"`)
         .join("")
 
     return `\n<${MESSAGE_ID_TAG_NAME}${serializedAttributes}>${ref}</${MESSAGE_ID_TAG_NAME}>`
@@ -139,15 +133,9 @@ export function assignMessageRefs(state: SessionState, messages: WithParts[]): n
         }
 
         const rawMessageId = message.info.id
-        if (typeof rawMessageId !== "string" || rawMessageId.length === 0) {
-            continue
-        }
 
         const existingRef = state.messageIds.byRawId.get(rawMessageId)
         if (existingRef) {
-            if (state.messageIds.byRef.get(existingRef) !== rawMessageId) {
-                state.messageIds.byRef.set(existingRef, rawMessageId)
-            }
             continue
         }
 
@@ -161,9 +149,7 @@ export function assignMessageRefs(state: SessionState, messages: WithParts[]): n
 }
 
 function allocateNextMessageRef(state: SessionState): string {
-    let candidate = Number.isInteger(state.messageIds.nextRef)
-        ? Math.max(MESSAGE_REF_MIN_INDEX, state.messageIds.nextRef)
-        : MESSAGE_REF_MIN_INDEX
+    let candidate = Math.max(MESSAGE_REF_MIN_INDEX, state.messageIds.nextRef)
 
     const max = state.idFormat === "compact" ? Number.MAX_SAFE_INTEGER : MESSAGE_REF_MAX_INDEX
     while (candidate <= max) {

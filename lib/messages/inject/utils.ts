@@ -116,7 +116,7 @@ function resolveContextTokenLimit(
  * allowance is used when the host reports it, otherwise 20% of the window; it is
  * capped at half the window so a small context never collapses the budget.
  */
-function resolveOutputReserve(state: SessionState): number | undefined {
+export function resolveOutputReserve(state: SessionState): number | undefined {
     const context = state.modelContextLimit
     const explicit = state.modelOutputLimit
     if (context === undefined) return explicit

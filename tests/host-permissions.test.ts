@@ -67,38 +67,7 @@ test("pattern-specific denies do not disable the whole tool", () => {
     )
 })
 
-test("compress permission resolution works without Array.findLast", () => {
-    const originalFindLast = Array.prototype.findLast
-
-    try {
-        delete (Array.prototype as Array<unknown> & { findLast?: unknown }).findLast
-
-        assert.equal(
-            compressDisabledByOpencode({
-                "*": "deny",
-                compress: "allow",
-            }),
-            false,
-        )
-    } finally {
-        Array.prototype.findLast = originalFindLast
-    }
-})
-
 test("explicit compress permissions are detected", () => {
     assert.equal(hasExplicitToolPermission({ compress: "ask" }, "compress"), true)
     assert.equal(hasExplicitToolPermission({ "*": "deny" }, "compress"), false)
-})
-
-test("explicit permission detection works without Object.hasOwn", () => {
-    const originalHasOwn = Object.hasOwn
-
-    try {
-        delete (Object as typeof Object & { hasOwn?: unknown }).hasOwn
-
-        assert.equal(hasExplicitToolPermission({ compress: "ask" }, "compress"), true)
-        assert.equal(hasExplicitToolPermission({ "*": "deny" }, "compress"), false)
-    } finally {
-        Object.hasOwn = originalHasOwn
-    }
 })

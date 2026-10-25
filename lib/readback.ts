@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto"
 import { tool } from "@opencode-ai/plugin"
 import type { Logger } from "./logger"
 import { formatMessageRef, parseBoundaryId } from "./message-ids"
 import { isIgnoredUserMessage } from "./messages/query"
 import { createSessionState, loadSessionState, type SessionState, type WithParts } from "./state"
-import { loadPruneMessagesState } from "./state/utils"
+import { loadMessageIdState, loadPruneMessagesState } from "./state/utils"
 import type { FullHistoryReader } from "./v2/full-history"
 import { redact } from "./compress/model"
 import { searchWithSgrep } from "./readback-sgrep"
@@ -78,13 +77,8 @@ const inputSchema = tool.schema
             ctx.addIssue({ code: "custom", message: "endId requires startId" })
         if (args.query !== undefined && !args.query.trim())
             ctx.addIssue({ code: "custom", message: "query must contain non-whitespace text" })
-        if (
-            args.query === undefined &&
-            (args.limit !== undefined ||
-                args.caseSensitive !== undefined ||
-                args.mode !== undefined)
-        )
-            ctx.addIssue({ code: "custom", message: "limit, caseSensitive and mode require query" })
+        if (args.query === undefined && args.mode === "semantic")
+            ctx.addIssue({ code: "custom", message: "semantic search requires query" })
         if (
             args.mode === "semantic" &&
             (args.cursor !== undefined || args.caseSensitive !== undefined)
@@ -156,7 +150,6 @@ function blockSources(state: SessionState, blockId: number): string[] {
         for (const messageId of block.effectiveMessageIds) ids.add(messageId)
         pending.push(...block.includedBlockIds, ...block.consumedBlockIds)
     }
-    if (!ids.size) throw new Error("DCP original source membership unavailable for this block")
     return [...ids]
 }
 
@@ -166,8 +159,6 @@ function selectSources(state: SessionState, messages: WithParts[], args: Readbac
         if (byId.has(id)) return [id]
         const parsed = parseBoundaryId(id) ?? parseBoundaryId(id, "compact")
         if (parsed?.kind === "compressed-block") {
-            if (!state.prune.messages.blocksById.has(parsed.blockId))
-                throw new Error("DCP block ID is unavailable in this session")
             return blockSources(state, parsed.blockId)
         }
         if (parsed?.kind === "message") {
@@ -195,16 +186,8 @@ function selectSources(state: SessionState, messages: WithParts[], args: Readbac
     return messages.slice(first, last + 1).map((message) => message.info.id)
 }
 
-function originalRecords(
-    state: SessionState,
-    sessionID: string,
-    rawMessages: WithParts[],
-    args: ReadbackArgs,
-) {
-    if (state.sessionId !== sessionID) throw new Error("DCP readback state/session mismatch")
-    const messages = rawMessages.filter(
-        (message) => message.info.sessionID === sessionID && !isIgnoredUserMessage(message),
-    )
+function originalRecords(state: SessionState, rawMessages: WithParts[], args: ReadbackArgs) {
+    const messages = rawMessages.filter((message) => !isIgnoredUserMessage(message))
     const ids = new Set(selectSources(state, messages, args))
     const selected = messages.filter((message) => ids.has(message.info.id))
     const found = new Set(selected.map((message) => message.info.id))
@@ -221,34 +204,36 @@ function originalRecords(
 /** Pure paging: neither compression state nor raw session messages are changed. */
 export function readOriginalPage(
     state: SessionState,
-    sessionID: string,
     rawMessages: WithParts[],
-    input: ReadbackArgs,
+    args: ReadbackArgs,
     beforeMessageId?: string,
 ) {
-    const args = inputSchema.parse(input)
-    if (args.mode === "semantic") throw new Error("Use searchOriginalSemantic for semantic queries")
-    let { records, missingSourceIds } = originalRecords(state, sessionID, rawMessages, args)
-    // A cursor pins the original upper boundary, so later turns are not part of its hash.
+    let { records, missingSourceIds } = originalRecords(state, rawMessages, args)
+    let cursor: { index: number; offset?: number; endSourceId?: string } | undefined
+    if (args.cursor) {
+        try {
+            cursor = JSON.parse(Buffer.from(args.cursor, "base64url").toString("utf8"))
+            if (
+                !Number.isSafeInteger(cursor!.index) ||
+                cursor!.index < 0 ||
+                (args.query === undefined &&
+                    (!Number.isSafeInteger(cursor!.offset) || cursor!.offset! < 0)) ||
+                (args.query !== undefined &&
+                    cursor!.endSourceId !== undefined &&
+                    typeof cursor!.endSourceId !== "string")
+            )
+                throw new Error("invalid")
+        } catch {
+            throw new Error("DCP cursor invalid; restart the same selection without cursor")
+        }
+    }
+    // A search cursor pins the original upper boundary across later turns.
     // Exclude the executing message on a new whole-session search: its tool result is mutable.
     if (args.query !== undefined) {
-        let endSourceId: unknown
-        if (args.cursor) {
-            try {
-                const cursor = JSON.parse(Buffer.from(args.cursor, "base64url").toString("utf8"))
-                endSourceId = cursor.endSourceId
-                if (endSourceId !== undefined && typeof endSourceId !== "string")
-                    throw new Error("invalid")
-                if (endSourceId !== undefined) {
-                    const end = records.findIndex((record) => record.sourceId === endSourceId)
-                    if (end < 0) throw new Error("missing boundary")
-                    records = records.slice(0, end + 1)
-                }
-            } catch {
-                throw new Error(
-                    "DCP cursor invalid or source changed; restart the same search without cursor",
-                )
-            }
+        if (cursor?.endSourceId !== undefined) {
+            const end = records.findIndex((record) => record.sourceId === cursor.endSourceId)
+            if (end < 0) throw new Error("DCP original cursor boundary unavailable in this session")
+            records = records.slice(0, end + 1)
         } else if (!args.startId && beforeMessageId) {
             const current = records.findIndex((record) => record.sourceId === beforeMessageId)
             if (current >= 0) records = records.slice(0, current)
@@ -269,38 +254,17 @@ export function readOriginalPage(
                       ? [{ ...record, matchOffset: match.index, matchLength: match[0].length }]
                       : []
               })
-    const fingerprint = createHash("sha256")
-        .update(
-            JSON.stringify([
-                sessionID,
-                args.startId,
-                args.endId,
-                records,
-                missingSourceIds,
-                ...(query === undefined ? [] : [query, args.caseSensitive ?? false]),
-            ]),
+    let index = cursor?.index ?? 0
+    let offset = cursor?.offset ?? 0
+    if (
+        cursor &&
+        (index >= (query === undefined ? records : matches).length ||
+            (query === undefined && offset >= records[index]!.text.length))
+    )
+        throw new Error(
+            "DCP cursor position unavailable; restart the same selection without cursor",
         )
-        .digest("hex")
     if (query !== undefined) {
-        let index = 0
-        if (args.cursor) {
-            try {
-                const cursor = JSON.parse(Buffer.from(args.cursor, "base64url").toString("utf8"))
-                if (
-                    cursor.v !== 2 ||
-                    cursor.hash !== fingerprint ||
-                    !Number.isSafeInteger(cursor.index) ||
-                    cursor.index < 0 ||
-                    cursor.index >= matches.length
-                )
-                    throw new Error("invalid")
-                index = cursor.index
-            } catch {
-                throw new Error(
-                    "DCP cursor invalid or source changed; restart the same search without cursor",
-                )
-            }
-        }
         let remaining = args.maxChars ?? 12000
         const sources: Array<(typeof matches)[number] & { offset: number; complete: boolean }> = []
         while (index < matches.length && sources.length < (args.limit ?? 10) && remaining > 0) {
@@ -333,37 +297,11 @@ export function readOriginalPage(
             nextCursor: truncated
                 ? Buffer.from(
                       JSON.stringify({
-                          v: 2,
-                          hash: fingerprint,
                           index,
                           endSourceId: records.at(-1)!.sourceId,
                       }),
                   ).toString("base64url")
                 : null,
-        }
-    }
-    let index = 0
-    let offset = 0
-    if (args.cursor) {
-        try {
-            const cursor = JSON.parse(Buffer.from(args.cursor, "base64url").toString("utf8"))
-            if (
-                cursor.v !== 1 ||
-                cursor.hash !== fingerprint ||
-                !Number.isSafeInteger(cursor.index) ||
-                cursor.index < 0 ||
-                cursor.index >= records.length ||
-                !Number.isSafeInteger(cursor.offset) ||
-                cursor.offset < 0 ||
-                cursor.offset >= records[cursor.index]!.text.length
-            )
-                throw new Error("invalid")
-            index = cursor.index
-            offset = cursor.offset
-        } catch {
-            throw new Error(
-                "DCP cursor invalid or source changed; restart the same selection without cursor",
-            )
         }
     }
     let remaining = args.maxChars ?? 12000
@@ -393,25 +331,19 @@ export function readOriginalPage(
         sources,
         truncated,
         nextCursor: truncated
-            ? Buffer.from(JSON.stringify({ v: 1, hash: fingerprint, index, offset })).toString(
-                  "base64url",
-              )
+            ? Buffer.from(JSON.stringify({ index, offset })).toString("base64url")
             : null,
     }
 }
 
 export async function searchOriginalSemantic(
     state: SessionState,
-    sessionID: string,
     rawMessages: WithParts[],
-    input: ReadbackArgs,
+    args: ReadbackArgs,
     signal?: AbortSignal,
 ) {
-    const args = inputSchema.parse(input)
-    if (args.mode !== "semantic" || args.query === undefined)
-        throw new Error("Semantic search requires mode semantic and query")
-    const { records, missingSourceIds } = originalRecords(state, sessionID, rawMessages, args)
-    const hits = await searchWithSgrep(records, args.query, args.limit ?? 10, signal)
+    const { records, missingSourceIds } = originalRecords(state, rawMessages, args)
+    const hits = await searchWithSgrep(records, args.query!, args.limit ?? 10, signal)
     let remaining = args.maxChars ?? 12000
     const sources = []
     for (const hit of hits) {
@@ -465,9 +397,7 @@ export function createReadbackTool(ctx: ReadbackContext): ReturnType<typeof tool
                     "DCP full-history readback requires the V2 fullMessages backend; bounded session.context is not a fallback",
                 )
             }
-            const messages = (await fullMessages(toolCtx.sessionID, toolCtx.abort)).filter(
-                (message) => message.info.sessionID === toolCtx.sessionID,
-            )
+            const messages = await fullMessages(toolCtx.sessionID, toolCtx.abort)
             // Ephemeral view: no prepareSession, strategies, sync, or persistence writes.
             const state = createSessionState(ctx.state.idFormat)
             state.sessionId = toolCtx.sessionID
@@ -482,39 +412,13 @@ export function createReadbackTool(ctx: ReadbackContext): ReturnType<typeof tool
             } else {
                 const saved = await loadSessionState(toolCtx.sessionID, ctx.logger)
                 state.prune.messages = loadPruneMessagesState(saved?.prune.messages)
-                // Optional state-worker fields: reuse persisted aliases rather
-                // than allocating refs for historical messages here. Unmapped
-                // messages still have their stable sourceId locator.
-                const persisted = saved as {
-                    messageIds?: {
-                        byRawId?: Record<string, string>
-                        byRef?: Record<string, string>
-                        nextRef?: number
-                    }
-                    lastCompaction?: number
-                } | null
-                if (persisted?.messageIds) {
-                    state.messageIds = {
-                        byRawId: new Map(Object.entries(persisted.messageIds.byRawId ?? {})),
-                        byRef: new Map(Object.entries(persisted.messageIds.byRef ?? {})),
-                        nextRef: persisted.messageIds.nextRef ?? 1,
-                    }
-                }
-                if (typeof persisted?.lastCompaction === "number") {
-                    state.lastCompaction = persisted.lastCompaction
-                }
+                loadMessageIdState(state, saved?.messageIds)
             }
             toolCtx.abort.throwIfAborted()
             const page =
                 args.mode === "semantic"
-                    ? await searchOriginalSemantic(
-                          state,
-                          toolCtx.sessionID,
-                          messages,
-                          args,
-                          toolCtx.abort,
-                      )
-                    : readOriginalPage(state, toolCtx.sessionID, messages, args, toolCtx.messageID)
+                    ? await searchOriginalSemantic(state, messages, args, toolCtx.abort)
+                    : readOriginalPage(state, messages, args, toolCtx.messageID)
             toolCtx.metadata({
                 title:
                     args.query !== undefined

@@ -6,15 +6,9 @@ import type {
     WithParts,
 } from "./types"
 import { isIgnoredUserMessage, messageHasCompress } from "../messages/query"
-import { isMessageWithInfo } from "../messages/shape"
-import { countTokens } from "../token-utils"
 import type { IdFormat } from "../message-ids"
 
 export const isMessageCompacted = (state: SessionState, msg: WithParts): boolean => {
-    if (!isMessageWithInfo(msg)) {
-        return false
-    }
-
     if (msg.info.time.created < state.lastCompaction) {
         return true
     }
@@ -53,20 +47,13 @@ export function serializePruneMessagesState(
 }
 
 export async function isSubAgentSession(client: any, sessionID: string): Promise<boolean> {
-    try {
-        const result = await client.session.get({ path: { id: sessionID } })
-        return !!result.data?.parentID
-    } catch (error: any) {
-        return false
-    }
+    const result = await client.session.get({ path: { id: sessionID } })
+    return !!result.data.parentID
 }
 
 export function findLastCompactionTimestamp(messages: WithParts[]): number {
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]
-        if (!isMessageWithInfo(msg)) {
-            continue
-        }
         if (msg.info.role === "assistant" && msg.info.summary === true) {
             return msg.info.time.created
         }
@@ -77,14 +64,10 @@ export function findLastCompactionTimestamp(messages: WithParts[]): number {
 export function countTurns(state: SessionState, messages: WithParts[]): number {
     let turnCount = 0
     for (const msg of messages) {
-        if (!isMessageWithInfo(msg)) {
-            continue
-        }
         if (isMessageCompacted(state, msg)) {
             continue
         }
-        const parts = Array.isArray(msg.parts) ? msg.parts : []
-        for (const part of parts) {
+        for (const part of msg.parts) {
             if (part.type === "step-start") {
                 turnCount++
             }
@@ -94,15 +77,7 @@ export function countTurns(state: SessionState, messages: WithParts[]): number {
 }
 
 export function loadPruneMap(obj?: Record<string, number>): Map<string, number> {
-    if (!obj || typeof obj !== "object") {
-        return new Map()
-    }
-
-    const entries = Object.entries(obj).filter(
-        (entry): entry is [string, number] =>
-            typeof entry[0] === "string" && typeof entry[1] === "number",
-    )
-    return new Map(entries)
+    return new Map(Object.entries(obj ?? {}))
 }
 
 export interface PersistedMessageIdState {
@@ -124,43 +99,10 @@ export function serializeMessageIdState(state: SessionState): PersistedMessageId
 // Restore aliases without allocating new ones or lowering the high-water mark, so
 // a service restart never renumbers refs the model has already seen.
 export function loadMessageIdState(state: SessionState, persisted?: PersistedMessageIdState): void {
-    if (!persisted || typeof persisted !== "object") {
-        return
-    }
-
-    if (persisted.byRawId && typeof persisted.byRawId === "object") {
-        for (const [rawId, ref] of Object.entries(persisted.byRawId)) {
-            if (!rawId || typeof ref !== "string" || ref.length === 0) {
-                continue
-            }
-            state.messageIds.byRawId.set(rawId, ref)
-            if (!state.messageIds.byRef.has(ref)) {
-                state.messageIds.byRef.set(ref, rawId)
-            }
-        }
-    }
-
-    if (persisted.byRef && typeof persisted.byRef === "object") {
-        for (const [ref, rawId] of Object.entries(persisted.byRef)) {
-            if (!ref || typeof rawId !== "string" || rawId.length === 0) {
-                continue
-            }
-            if (!state.messageIds.byRef.has(ref)) {
-                state.messageIds.byRef.set(ref, rawId)
-            }
-            if (!state.messageIds.byRawId.has(rawId)) {
-                state.messageIds.byRawId.set(rawId, ref)
-            }
-        }
-    }
-
-    if (
-        typeof persisted.nextRef === "number" &&
-        Number.isInteger(persisted.nextRef) &&
-        persisted.nextRef > state.messageIds.nextRef
-    ) {
-        state.messageIds.nextRef = persisted.nextRef
-    }
+    if (!persisted) return
+    state.messageIds.byRawId = new Map(Object.entries(persisted.byRawId ?? {}))
+    state.messageIds.byRef = new Map(Object.entries(persisted.byRef ?? {}))
+    state.messageIds.nextRef = Math.max(state.messageIds.nextRef, persisted.nextRef ?? 1)
 }
 
 export function createPruneMessagesState(): PruneMessagesState {
@@ -178,175 +120,17 @@ export function loadPruneMessagesState(
     persisted?: PersistedPruneMessagesState,
 ): PruneMessagesState {
     const state = createPruneMessagesState()
-    if (!persisted || typeof persisted !== "object") {
-        return state
+    if (!persisted) return state
+    return {
+        byMessageId: new Map(Object.entries(persisted.byMessageId)),
+        blocksById: new Map(
+            Object.entries(persisted.blocksById).map(([id, block]) => [Number(id), block]),
+        ),
+        activeBlockIds: new Set(persisted.activeBlockIds),
+        activeByAnchorMessageId: new Map(Object.entries(persisted.activeByAnchorMessageId)),
+        nextBlockId: persisted.nextBlockId,
+        nextRunId: persisted.nextRunId,
     }
-
-    if (typeof persisted.nextBlockId === "number" && Number.isInteger(persisted.nextBlockId)) {
-        state.nextBlockId = Math.max(1, persisted.nextBlockId)
-    }
-    if (typeof persisted.nextRunId === "number" && Number.isInteger(persisted.nextRunId)) {
-        state.nextRunId = Math.max(1, persisted.nextRunId)
-    }
-
-    if (persisted.byMessageId && typeof persisted.byMessageId === "object") {
-        for (const [messageId, entry] of Object.entries(persisted.byMessageId)) {
-            if (!entry || typeof entry !== "object") {
-                continue
-            }
-
-            const tokenCount = typeof entry.tokenCount === "number" ? entry.tokenCount : 0
-            const allBlockIds = Array.isArray(entry.allBlockIds)
-                ? [
-                      ...new Set(
-                          entry.allBlockIds.filter(
-                              (id): id is number => Number.isInteger(id) && id > 0,
-                          ),
-                      ),
-                  ]
-                : []
-            const activeBlockIds = Array.isArray(entry.activeBlockIds)
-                ? [
-                      ...new Set(
-                          entry.activeBlockIds.filter(
-                              (id): id is number => Number.isInteger(id) && id > 0,
-                          ),
-                      ),
-                  ]
-                : []
-
-            state.byMessageId.set(messageId, {
-                tokenCount,
-                allBlockIds,
-                activeBlockIds,
-            })
-        }
-    }
-
-    if (persisted.blocksById && typeof persisted.blocksById === "object") {
-        for (const [blockIdStr, block] of Object.entries(persisted.blocksById)) {
-            const blockId = Number.parseInt(blockIdStr, 10)
-            if (!Number.isInteger(blockId) || blockId < 1 || !block || typeof block !== "object") {
-                continue
-            }
-
-            const toNumberArray = (value: unknown): number[] =>
-                Array.isArray(value)
-                    ? [
-                          ...new Set(
-                              value.filter(
-                                  (item): item is number => Number.isInteger(item) && item > 0,
-                              ),
-                          ),
-                      ]
-                    : []
-            const toStringArray = (value: unknown): string[] =>
-                Array.isArray(value)
-                    ? [...new Set(value.filter((item): item is string => typeof item === "string"))]
-                    : []
-
-            state.blocksById.set(blockId, {
-                blockId,
-                runId:
-                    typeof block.runId === "number" &&
-                    Number.isInteger(block.runId) &&
-                    block.runId > 0
-                        ? block.runId
-                        : blockId,
-                active: block.active === true,
-                deactivatedByUser: block.deactivatedByUser === true,
-                compressedTokens:
-                    typeof block.compressedTokens === "number" &&
-                    Number.isFinite(block.compressedTokens)
-                        ? Math.max(0, block.compressedTokens)
-                        : 0,
-                summaryTokens:
-                    typeof block.summaryTokens === "number" && Number.isFinite(block.summaryTokens)
-                        ? Math.max(0, block.summaryTokens)
-                        : typeof block.summary === "string"
-                          ? countTokens(block.summary)
-                          : 0,
-                durationMs:
-                    typeof block.durationMs === "number" && Number.isFinite(block.durationMs)
-                        ? Math.max(0, block.durationMs)
-                        : 0,
-                mode: block.mode === "range" || block.mode === "message" ? block.mode : undefined,
-                topic: typeof block.topic === "string" ? block.topic : "",
-                batchTopic:
-                    typeof block.batchTopic === "string"
-                        ? block.batchTopic
-                        : typeof block.topic === "string"
-                          ? block.topic
-                          : "",
-                startId: typeof block.startId === "string" ? block.startId : "",
-                endId: typeof block.endId === "string" ? block.endId : "",
-                anchorMessageId:
-                    typeof block.anchorMessageId === "string" ? block.anchorMessageId : "",
-                compressMessageId:
-                    typeof block.compressMessageId === "string" ? block.compressMessageId : "",
-                compressCallId:
-                    typeof block.compressCallId === "string" ? block.compressCallId : undefined,
-                includedBlockIds: toNumberArray(block.includedBlockIds),
-                consumedBlockIds: toNumberArray(block.consumedBlockIds),
-                parentBlockIds: toNumberArray(block.parentBlockIds),
-                directMessageIds: toStringArray(block.directMessageIds),
-                directToolIds: toStringArray(block.directToolIds),
-                effectiveMessageIds: toStringArray(block.effectiveMessageIds),
-                effectiveToolIds: toStringArray(block.effectiveToolIds),
-                createdAt: typeof block.createdAt === "number" ? block.createdAt : 0,
-                deactivatedAt:
-                    typeof block.deactivatedAt === "number" ? block.deactivatedAt : undefined,
-                deactivatedByBlockId:
-                    typeof block.deactivatedByBlockId === "number" &&
-                    Number.isInteger(block.deactivatedByBlockId)
-                        ? block.deactivatedByBlockId
-                        : undefined,
-                summary: typeof block.summary === "string" ? block.summary : "",
-                released: block.released === true ? true : undefined,
-            })
-        }
-    }
-
-    if (Array.isArray(persisted.activeBlockIds)) {
-        for (const blockId of persisted.activeBlockIds) {
-            if (!Number.isInteger(blockId) || blockId < 1) {
-                continue
-            }
-            state.activeBlockIds.add(blockId)
-        }
-    }
-
-    if (
-        persisted.activeByAnchorMessageId &&
-        typeof persisted.activeByAnchorMessageId === "object"
-    ) {
-        for (const [anchorMessageId, blockId] of Object.entries(
-            persisted.activeByAnchorMessageId,
-        )) {
-            if (typeof blockId !== "number" || !Number.isInteger(blockId) || blockId < 1) {
-                continue
-            }
-            state.activeByAnchorMessageId.set(anchorMessageId, blockId)
-        }
-    }
-
-    for (const [blockId, block] of state.blocksById) {
-        if (block.active) {
-            state.activeBlockIds.add(blockId)
-            // Released blocks own their covered messages but must not inject a summary.
-            if (block.anchorMessageId && block.released !== true) {
-                state.activeByAnchorMessageId.set(block.anchorMessageId, blockId)
-            }
-        }
-        if (blockId >= state.nextBlockId) {
-            state.nextBlockId = blockId + 1
-        }
-        if (block.runId >= state.nextRunId) {
-            state.nextRunId = block.runId + 1
-        }
-    }
-
-    return state
 }
 
 export function collectTurnNudgeAnchors(messages: WithParts[]): Set<string> {

@@ -32,37 +32,25 @@ export const checkSession = async (
 
     if (state.sessionId === null || state.sessionId !== lastSessionId) {
         logger.info(`Session changed: ${state.sessionId} -> ${lastSessionId}`)
-        try {
-            await ensureSessionInitialized(
-                client,
-                state,
-                lastSessionId,
-                logger,
-                messages,
-                manualModeDefault,
-            )
-        } catch (err: any) {
-            logger.error("Failed to initialize session state", { error: err.message })
-        }
+        await ensureSessionInitialized(
+            client,
+            state,
+            lastSessionId,
+            logger,
+            messages,
+            manualModeDefault,
+        )
     }
 
     const lastCompactionTimestamp = findLastCompactionTimestamp(messages)
     if (lastCompactionTimestamp > state.lastCompaction) {
-        const previousCompaction = state.lastCompaction
         state.lastCompaction = lastCompactionTimestamp
         resetOnCompaction(state)
         logger.info("Detected compaction - reset stale state", {
             timestamp: lastCompactionTimestamp,
         })
 
-        try {
-            await saveSessionState(state, logger, undefined, true)
-        } catch (error) {
-            // Keep the old marker so the next turn retries the reset instead of
-            // continuing with unpersisted state.
-            state.lastCompaction = previousCompaction
-            throw error
-        }
+        await saveSessionState(state, logger)
     }
 
     state.currentTurn = countTurns(state, messages)
@@ -176,15 +164,14 @@ export async function ensureSessionInitialized(
         return
     }
 
-    if (typeof persisted.manualMode === "boolean") {
+    if (persisted.manualMode !== undefined) {
         state.manualMode = persisted.manualMode ? "active" : false
     }
 
     state.prune.tools = loadPruneMap(persisted.prune.tools)
     state.prune.messages = loadPruneMessagesState(persisted.prune.messages)
     loadMessageIdState(state, persisted.messageIds)
-    const persistedCompaction =
-        typeof persisted.lastCompaction === "number" ? persisted.lastCompaction : undefined
+    const persistedCompaction = persisted.lastCompaction
     const newestBlockCreatedAt = Math.max(
         0,
         ...Array.from(state.prune.messages.blocksById.values(), (block) => block.createdAt),

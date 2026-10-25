@@ -48,9 +48,8 @@ export function mergeSubagentResult(output: string, subAgentResultText: string):
 }
 
 function getLastTextPart(message: WithParts): string {
-    const parts = Array.isArray(message.parts) ? message.parts : []
-    for (let index = parts.length - 1; index >= 0; index--) {
-        const part = parts[index]
+    for (let index = message.parts.length - 1; index >= 0; index--) {
+        const part = message.parts[index]
         if (part.type !== "text" || typeof part.text !== "string") {
             continue
         }
@@ -67,8 +66,7 @@ function getLastTextPart(message: WithParts): string {
 }
 
 function assistantMessageHasCompressTool(message: WithParts): boolean {
-    const parts = Array.isArray(message.parts) ? message.parts : []
-    return parts.some(
+    return message.parts.some(
         (part) =>
             part.type === "tool" && part.tool === "compress" && part.state?.status === "completed",
     )

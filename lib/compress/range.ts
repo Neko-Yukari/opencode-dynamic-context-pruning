@@ -15,6 +15,7 @@ import {
     stripBlockPlaceholders,
     validateArgs,
     validateNonOverlapping,
+    validateSelectionArgs,
 } from "./range-utils"
 import {
     COMPRESSED_BLOCK_HEADER,
@@ -23,10 +24,19 @@ import {
     applyCompressionState,
     wrapCompressedSummary,
 } from "./state"
-import type { CompressRangeToolArgs } from "./types"
-import { generateSummary, selectedSource, redact, MODEL_SELECTION_INSTRUCTIONS } from "./model"
+import type { CompressRangeArgsInput, CompressRangeToolArgs } from "./types"
+import {
+    estimate,
+    generateSummary,
+    selectedSource,
+    redact,
+    MODEL_SELECTION_INSTRUCTIONS,
+    summaryBudget,
+} from "./model"
 import type { SessionState } from "../state"
 import { saveSessionState } from "../state/persistence"
+import { assertCompressedContextFits } from "./capacity"
+import { markNoteInjection } from "../notes"
 
 function buildSchema(format: IdFormat, configured: boolean) {
     return {
@@ -80,16 +90,11 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                 throw new Error(
                     "DCP compress.model currently requires compress.mode='range'; original context retained",
                 )
-            const input = configured
-                ? ({
-                      ...args,
-                      content: args.content.map((entry) => ({
-                          ...entry,
-                          summary: "[pending configured model]",
-                      })),
-                  } as CompressRangeToolArgs)
-                : (args as CompressRangeToolArgs)
-            validateArgs(input)
+            // Configured mode takes boundaries only: the configured model authors
+            // every summary, so demanding or inventing one here would be wrong.
+            if (configured) validateSelectionArgs(args)
+            else validateArgs(args as CompressRangeToolArgs)
+            const input = args as CompressRangeArgsInput
             if (configured) toolCtx.abort.throwIfAborted()
             const callId =
                 typeof (toolCtx as unknown as { callID?: unknown }).callID === "string"
@@ -122,6 +127,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                 consumedBlockIds: number[]
             }> = []
             let totalCompressedMessages = 0
+            let summaryReplyTokens = 0
 
             for (const plan of resolvedPlans) {
                 const source = configured
@@ -134,18 +140,10 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                         source!,
                         toolCtx.abort,
                     )
-                    const references = parseBlockPlaceholders(
-                        plan.entry.summary,
-                        ctx.state.idFormat,
-                    )
-                    if (
-                        references.some(
-                            (ref) => !plan.selection.requiredBlockIds.includes(ref.blockId),
-                        )
-                    )
-                        throw new Error(
-                            "DCP summarizer referenced an unselected block; original context retained",
-                        )
+                }
+                if (source) {
+                    summaryReplyTokens +=
+                        5 * summaryBudget(estimate(source.text), source.media.images().length)
                 }
                 const rewritten = stripBlockPlaceholders(
                     plan.entry.summary,
@@ -246,15 +244,16 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                 })
             }
 
-            try {
-                await saveSessionState(staged, ctx.logger, undefined, true)
-            } catch (error) {
-                throw new Error(
-                    `DCP compression could not persist its state; original context retained. ${(error as Error)?.message ?? ""}`.trim(),
-                )
-            }
+            assertCompressedContextFits(
+                ctx,
+                staged,
+                rawMessages,
+                configured ? summaryReplyTokens : undefined,
+            )
+            await saveSessionState(staged, ctx.logger)
             ctx.state.prune = staged.prune
             ctx.state.stats = staged.stats
+            markNoteInjection(ctx.state.sessionId)
 
             // State is already persisted: a notification failure must not be
             // reported as "original context retained".

@@ -15,6 +15,8 @@ import {
 import type { CompressMessageToolArgs } from "./types"
 import type { SessionState } from "../state"
 import { saveSessionState } from "../state/persistence"
+import { assertCompressedContextFits } from "./capacity"
+import { markNoteInjection } from "../notes"
 
 function buildSchema(format: IdFormat) {
     return {
@@ -151,9 +153,11 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                 })
             }
 
-            await saveSessionState(staged, ctx.logger, undefined, true)
+            assertCompressedContextFits(ctx, staged, rawMessages)
+            await saveSessionState(staged, ctx.logger)
             ctx.state.prune = staged.prune
             ctx.state.stats = staged.stats
+            markNoteInjection(ctx.state.sessionId)
             try {
                 await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
             } catch (error) {

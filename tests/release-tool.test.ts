@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Logger } from "../lib/logger"
-import type { WithParts } from "../lib/state"
+import type { SessionState, WithParts } from "../lib/state"
 import type { ToolContext } from "../lib/compress/types"
 
 const dataHome = mkdtempSync(join(tmpdir(), "dcp-release-tool-"))
@@ -100,6 +100,52 @@ const args = (startId: string, endId: string) => ({
     content: [{ startId, endId }],
 })
 
+function addActiveBlock(
+    state: SessionState,
+    blockId: number,
+    anchorMessageId: string,
+    messageIds: string[],
+): void {
+    state.prune.messages.blocksById.set(blockId, {
+        blockId,
+        runId: blockId,
+        active: true,
+        deactivatedByUser: false,
+        compressedTokens: 10,
+        summaryTokens: 5,
+        durationMs: 0,
+        topic: "old",
+        startId: messageIds[0]!,
+        endId: messageIds.at(-1)!,
+        anchorMessageId,
+        compressMessageId: "caller",
+        includedBlockIds: [],
+        consumedBlockIds: [],
+        parentBlockIds: [],
+        directMessageIds: [...messageIds],
+        directToolIds: [],
+        effectiveMessageIds: [...messageIds],
+        effectiveToolIds: [],
+        createdAt: 1,
+        summary: "[Compressed conversation section]\nold body",
+    })
+    state.prune.messages.activeBlockIds.add(blockId)
+    state.prune.messages.activeByAnchorMessageId.set(anchorMessageId, blockId)
+    for (const messageId of messageIds) {
+        const entry = state.prune.messages.byMessageId.get(messageId)
+        if (entry) {
+            if (!entry.allBlockIds.includes(blockId)) entry.allBlockIds.push(blockId)
+            if (!entry.activeBlockIds.includes(blockId)) entry.activeBlockIds.push(blockId)
+            continue
+        }
+        state.prune.messages.byMessageId.set(messageId, {
+            tokenCount: 5,
+            allBlockIds: [blockId],
+            activeBlockIds: [blockId],
+        })
+    }
+}
+
 test("releasing a raw range hides it and records a released block", async () => {
     const f = fixture()
     const content = await createReleaseTool(f.ctx).execute(args("@1@", "@2@"), f.toolCtx as never)
@@ -112,6 +158,80 @@ test("releasing a raw range hides it and records a released block", async () => 
     assert.equal(blocks[0]!.summaryTokens, 0)
     assert.deepEqual(f.state.prune.messages.byMessageId.get("m1")?.activeBlockIds, [1])
     assert.equal(f.state.prune.messages.activeByAnchorMessageId.size, 0)
+})
+
+test("releasing a whole block reports effective source messages and selected blocks", async () => {
+    const f = fixture()
+    f.state.prune.messages.nextBlockId = 2
+    f.state.prune.messages.nextRunId = 2
+    f.state.prune.messages.blocksById.set(1, {
+        blockId: 1,
+        runId: 1,
+        active: true,
+        deactivatedByUser: false,
+        compressedTokens: 10,
+        summaryTokens: 5,
+        durationMs: 0,
+        topic: "old",
+        startId: "m1",
+        endId: "m2",
+        anchorMessageId: "m1",
+        compressMessageId: "caller",
+        includedBlockIds: [],
+        consumedBlockIds: [],
+        parentBlockIds: [],
+        directMessageIds: ["m1", "m2"],
+        directToolIds: [],
+        effectiveMessageIds: ["m1", "m2"],
+        effectiveToolIds: [],
+        createdAt: 1,
+        summary: "[Compressed conversation section]\nold body",
+    })
+    f.state.prune.messages.activeBlockIds.add(1)
+    f.state.prune.messages.activeByAnchorMessageId.set("m1", 1)
+    for (const messageId of ["m1", "m2"]) {
+        f.state.prune.messages.byMessageId.set(messageId, {
+            tokenCount: 5,
+            allBlockIds: [1],
+            activeBlockIds: [1],
+        })
+    }
+
+    const content = await createReleaseTool(f.ctx).execute(args("@b1@", "@b1@"), f.toolCtx as never)
+
+    assert.match(String(content), /Released 2 messages \(covering 1 selected old block\) into b2/)
+    const oldBlock = f.state.prune.messages.blocksById.get(1)
+    const releasedBlock = f.state.prune.messages.blocksById.get(2)
+    assert.equal(oldBlock?.active, false)
+    assert.equal(releasedBlock?.released, true)
+    assert.equal(releasedBlock?.summary, "")
+    assert.equal(releasedBlock?.summaryTokens, 0)
+    assert.deepEqual(releasedBlock?.effectiveMessageIds.sort(), ["m1", "m2"])
+    assert.equal(f.state.prune.messages.activeByAnchorMessageId.size, 0)
+})
+
+test("overlapping effective sources across whole blocks are counted once", async () => {
+    const f = fixture()
+    f.state.prune.messages.nextBlockId = 3
+    f.state.prune.messages.nextRunId = 3
+    addActiveBlock(f.state, 1, "m1", ["m1", "m2"])
+    addActiveBlock(f.state, 2, "m3", ["m2", "m3"])
+
+    const content = await createReleaseTool(f.ctx).execute(
+        {
+            topic: "Finished",
+            content: [
+                { startId: "@b1@", endId: "@b1@" },
+                { startId: "@b2@", endId: "@b2@" },
+            ],
+        },
+        f.toolCtx as never,
+    )
+
+    assert.match(
+        String(content),
+        /Released 3 messages \(covering 2 selected old blocks\) into b3, b4/,
+    )
 })
 
 test("a hidden boundary is rejected and nothing is mutated", async () => {
@@ -189,10 +309,9 @@ test("releasing its own call is rejected", async () => {
     assert.equal(f.state.prune.messages.blocksById.size, 0)
 })
 
-test("strict persistence rejects while the default save stays best-effort", async () => {
+test("an uninitialized session has no state to persist", async () => {
     const state = createSessionState("compact")
     state.sessionId = null
-    await assert.rejects(saveSessionState(state, new Logger(false), undefined, true), /session/i)
     await assert.doesNotReject(saveSessionState(state, new Logger(false)))
 })
 

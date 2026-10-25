@@ -9,12 +9,13 @@ export interface SummaryImage {
     uri: string
 }
 
-// Budget the image path enforces once the host has loaded the real media parts.
-export interface SummaryImageBudget {
-    context: number
-    input: number
-    output: number
-    summary: number
+// Real model window budget for one summarizer request. The adapter adds decoded
+// image tokens; the text path uses the same formula with no images.
+export interface SummaryRequestCapacity {
+    promptTokens: number
+    contextWindow: number
+    outputLimit: number
+    recommendation: number
 }
 
 export interface ToolContext {
@@ -29,10 +30,10 @@ export interface ToolContext {
                 prompt: string
                 model: { providerID: string; id: string; variant?: string }
                 images?: SummaryImage[]
-                imageBudget?: SummaryImageBudget
+                capacity?: SummaryRequestCapacity
             },
             signal: AbortSignal,
-        ): Promise<{ text: string; imageTokens?: number }>
+        ): Promise<{ text: string }>
         models(signal: AbortSignal): Promise<
             Array<{
                 providerID: string
@@ -54,6 +55,21 @@ export interface CompressRangeEntry {
 export interface CompressRangeToolArgs {
     topic: string
     content: CompressRangeEntry[]
+}
+
+/**
+ * Range input as the caller supplies it. The configured model authors every
+ * summary, so a caller without one passes boundaries only.
+ */
+export interface CompressRangeInput {
+    startId: string
+    endId: string
+    summary?: string
+}
+
+export interface CompressRangeArgsInput {
+    topic: string
+    content: CompressRangeInput[]
 }
 
 export interface CompressMessageEntry {

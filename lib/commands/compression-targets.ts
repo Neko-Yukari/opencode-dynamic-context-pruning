@@ -16,10 +16,7 @@ function byBlockId(a: CompressionBlock, b: CompressionBlock): number {
 
 function buildTarget(blocks: CompressionBlock[]): CompressionTarget {
     const ordered = [...blocks].sort(byBlockId)
-    const first = ordered[0]
-    if (!first) {
-        throw new Error("Cannot build compression target from empty block list.")
-    }
+    const first = ordered[0]!
 
     const grouped = first.mode === "message"
     return {
@@ -129,9 +126,5 @@ export function resolveCompressionTarget(
     const blocks = Array.from(messagesState.blocksById.values()).filter(
         (candidate) => candidate.mode === "message" && candidate.runId === block.runId,
     )
-    if (blocks.length === 0) {
-        return null
-    }
-
     return buildTarget(blocks)
 }

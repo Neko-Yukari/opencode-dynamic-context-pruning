@@ -107,8 +107,8 @@ export function getFilePathsFromParameters(tool: string, parameters: unknown): s
 }
 
 export function isFilePathProtected(filePaths: string[], patterns: string[]): boolean {
-    if (!filePaths || filePaths.length === 0) return false
-    if (!patterns || patterns.length === 0) return false
+    if (filePaths.length === 0) return false
+    if (patterns.length === 0) return false
 
     return filePaths.some((path) => patterns.some((pattern) => matchesGlob(path, pattern)))
 }
@@ -116,7 +116,7 @@ export function isFilePathProtected(filePaths: string[], patterns: string[]): bo
 const GLOB_CHARS = /[*?]/
 
 export function isToolNameProtected(toolName: string, patterns: string[]): boolean {
-    if (!toolName || !patterns || patterns.length === 0) return false
+    if (!toolName || patterns.length === 0) return false
 
     const exactPatterns: Set<string> = new Set()
     const globPatterns: string[] = []

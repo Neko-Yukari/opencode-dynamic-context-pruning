@@ -172,9 +172,6 @@ export function applyCompressionState(
         entry: { activeBlockIds: number[] },
         blockIdToRemove: number,
     ): void => {
-        if (entry.activeBlockIds.length === 0) {
-            return
-        }
         entry.activeBlockIds = entry.activeBlockIds.filter((id) => id !== blockIdToRemove)
     }
 

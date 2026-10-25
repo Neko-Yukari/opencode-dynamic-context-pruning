@@ -56,28 +56,26 @@ selected range, so the most important information is never lost. Note that large
 
 ### Session note (OpenCode V2)
 
-The session note and `dcp_release` described below are registered by the OpenCode V2 plugin. The legacy V1 integration exposes only `compress` and `dcp_read`, and its `compress` has no note or review gate.
+The session note and `dcp_release` described below are registered by the OpenCode V2 plugin. The legacy V1 integration exposes only `compress` and `dcp_read`.
 
-V2 keeps one formal note per session in the session database and a fixed per-session Markdown draft. `dcp_note({ "action": "read" })` returns the draft path and revision, its character count and suggested size, and `dirty`/`stale` flags instead of duplicating the note body. Edit the draft with the normal `read`, `grep`, `edit`, `patch` or `write` tools, then commit it with `dcp_note({ "action": "write" })`:
+V2 keeps one formal note per session in the session database and a fixed per-session Markdown draft. `dcp_note({ "action": "read" })` returns the draft path and revision, its character count, suggested size and `dirty` flag. Edit the draft with the normal `read`, `grep`, `edit`, `patch` or `write` tools, then commit it with `dcp_note({ "action": "write" })`:
 
 ```json
 { "action": "read" }
 { "action": "write" }
 ```
 
-A commit is accepted even when the draft is unchanged and still records the review. The note is an agent-maintained work record, not a replacement summary, and it has no hard size limit; about 8,000 characters is suggested.
+A commit is accepted even when the draft is unchanged. The note is an agent-maintained work record, not a replacement summary, and it has no hard size limit; about 8,000 characters is suggested.
 
-The committed note is already included in context. Normal work needs no note reads or writes. Prepare one concise continuation checkpoint when reducing context, keeping only facts needed after the selected history is removed. Omit transcripts, routine progress and context-management bookkeeping. No follow-up note entry or status report is needed solely to record a successful note commit, compression or release. Use the shortest sufficient note; the suggested size is not a target.
+The note is injected once after each successful compression or release. Keep only facts needed after the selected history is removed. Omit transcripts, routine progress and context-management bookkeeping. No follow-up note entry or status report is needed solely to record a successful note commit, compression or release. Use the shortest sufficient note; the suggested size is not a target.
 
-`compress` and `dcp_release` require a commit from the current review. New user instructions, recalled evidence such as `dcp_read` results, and new work results invalidate the review; editing the note and consecutive compression or release calls do not. Uncommitted draft edits block both tools, so read, update and commit the note before reducing context further.
+The note is user-maintained; update it only when the user explicitly asks. `compress` and `dcp_release` do not require a review hash, a note commit or a clean draft.
 
-Only the committed note enters context. It is injected in a protected user-role data message outside the prunable history, never as a system instruction, and grants no authority; current user instructions and verified evidence take precedence. Each session has its own note and draft, including each parent and child session.
+Only the committed note enters context. It is injected once after each successful compression or release, in a protected user-role data message outside the prunable history, never as a system instruction, and grants no authority; current user instructions and verified evidence take precedence. Each session has its own note and draft, including each parent and child session.
 
-Read never overwrites an uncommitted draft. A draft that differs from the stored note is reported `dirty`, and it is reported `stale` when the stored note changed after the draft's base. A dirty stale read also returns `currentPath`, pointing at a `current.md` copy of the stored note, and a `recovery` object with short instructions; that copy is not note truth and must not be edited or committed. A commit in that state is refused and leaves the draft and stored note unchanged.
+Read creates the draft from the stored note only when the draft is missing. Existing draft content stays intact and is reported `dirty` when it differs from the stored note. Write commits the current draft directly; it does not track base revisions or create recovery copies.
 
-Compare the two drafts, preserve useful edits, write `note.md` to match `current.md` exactly, run `dcp_note` with the `read` action so the clean draft rebases, then apply the merged edits and commit.
-
-The draft is stored at `${XDG_DATA_HOME:-~/.local/share}/opencode/storage/dcp-notes/<session-folder>/note.md` and stays stable when the workspace moves; the formal note lives in the session database. Note calls are serialized per session, but session storage is plain get/set, so concurrent commits from other processes or plugin locations can still race. The draft is outside the workspace, so the host's normal file-access rules for external directories apply when you edit it; DCP does not bypass them.
+The draft is stored at `${XDG_DATA_HOME:-~/.local/share}/opencode/storage/dcp-notes/<session-folder>/note.md` and stays stable when the workspace moves; the formal note lives in the session database. Note operations use the host's plain get/set storage. The draft is outside the workspace, so the host's normal file-access rules for external directories apply when you edit it; DCP does not bypass them.
 
 ### Release completed history (OpenCode V2)
 
@@ -85,14 +83,14 @@ The draft is stored at `${XDG_DATA_HOME:-~/.local/share}/opencode/storage/dcp-no
 
 ```json
 {
-  "topic": "Finished auth exploration",
-  "content": [{ "startId": "@12@", "endId": "@18@" }]
+    "topic": "Finished auth exploration",
+    "content": [{ "startId": "@12@", "endId": "@18@" }]
 }
 ```
 
 Use visible message IDs or complete active block IDs as bounds; using a block ID for both bounds releases that whole block. Messages already hidden inside a block are not selectable as bounds and can only be inspected through `dcp_read`. A released block is readback-only. Every range must be closed (no in-progress tool calls), ranges in one call must not overlap, and a release call cannot include itself.
 
-Released regions become holes: their messages and any recorded summary stop entering context, and released blocks cannot be selected again. The originals remain available through `dcp_read`. Release is one-way: `dcp_release` has no restore, and the `/dcp decompress` and `/dcp recompress` commands report that restore is disabled. Release requires the same current note review as compression.
+Released regions become holes: their messages and any recorded summary stop entering context, and released blocks cannot be selected again. The originals remain available through `dcp_read`. Release is one-way: `dcp_release` has no restore, and the `/dcp decompress` and `/dcp recompress` commands report that restore is disabled.
 
 ### Native compaction (OpenCode V2)
 
@@ -120,9 +118,9 @@ observable text/tool inputs and results. `text` contains a fragment of a JSON co
 array; concatenate fragments by `sourceId` and `offset` before parsing. `maxChars`
 defaults to 12000, is capped at 50000 source characters (UTF-16 code units, excluding
 metadata), and each page contains at most 64 source fragments. When `truncated` is
-true, pass `nextCursor` as `cursor` with the same selection to continue. Cursors are
-bound to the session, selection and source contents; changed sources require
-restarting without a cursor.
+true, pass `nextCursor` as `cursor` with the same selection to continue. Cursors
+carry paging coordinates. Restart without a cursor after changing the selection
+or query; DCP does not hash source contents to detect changes.
 
 Only the calling session's stored originals are read. Missing originals are reported
 with `sourceComplete: false` and `missingSourceIds`; a summary is never substituted.
@@ -134,14 +132,13 @@ ranges stay omitted from context. The ordinary host tool result still uses conte
 tokens.
 
 `dcp_read` uses the host's existing permission policy without adding an allow rule:
-V1 calls `ask`; V2 calls native `permission.assert` and fails closed on older hosts
-without that API. The existing `experimental.allowSubAgents` restriction also applies.
+V1 calls `ask`; V2 calls native `permission.assert`. The existing
+`experimental.allowSubAgents` restriction also applies.
 
-In V2, full-history readback requires the host's registered local service and an
-authenticated message-list API. DCP checks that the service reports this plugin's own
-process ID and refuses a different process. Without a verified service, for example in
-a standalone client, `dcp_read` returns an explicit error instead of falling back to the
-bounded `session.context` view.
+In V2, full-history readback uses the host's registered local service and an
+authenticated message-list API. Without that service, for example in a standalone
+client, `dcp_read` returns an explicit error. The bounded `session.context` view
+cannot supply the full original history.
 
 ### Search original details
 
@@ -158,8 +155,7 @@ exact casing. A search returns one first-match snippet per source, stable `sourc
 and `ref` values, and offsets in the same observable JSON used by readback. Optional
 `startId` / `endId` restrict the selection. Text-search cursors retain the original
 historical upper boundary, so later messages do not invalidate pagination; restart
-without a cursor to include newer messages. Changes to selected historical content
-still invalidate the cursor. The executing message is excluded from a new whole-session
+without a cursor to include newer messages. The executing message is excluded from a new whole-session
 text search because its tool result has not finished being stored.
 
 Semantic mode runs the local [context-dot-dev/sgrep](https://github.com/context-dot-dev/sgrep)
@@ -385,17 +381,32 @@ collections above OpenCode 2.1's 25 MiB inline request limit are rejected before
 admission so the host cannot silently omit selected images. Select a smaller closed
 range when that limit is reached; original images and context are retained.
 
-Unknown model limits, oversized input, cancellation and invalid summaries leave
-the original context intact. No input is silently truncated. Fallbacks require
-an explicit retryable provider status; ambiguous native errors are not retried.
+Missing model or variant references, provider errors, cancellation and invalid
+summaries leave the original context intact. No input is silently truncated.
+Fallbacks follow the configured order for explicitly classified provider errors.
 
-Malformed JSON, an invalid summary object, or a summary over its computed budget
-can trigger one correction request to the same model and variant. The correction
-uses the full selected source and images, with specific format or measured-length
-feedback; it does not include the failed reply. It shares the current model's
-timeout and rechecks input capacity. Each compression range allows at most one
-such correction across all configured fallbacks. A second invalid result leaves
-the original context intact.
+The summarizer returns the summary body as plain text. The application owns the
+stored summary and any metadata; an empty summary fails directly without a model
+switch.
+
+Summary length is advisory: 20% of the first 20,000 estimated source tokens, 15%
+of the next 80,000 and 10% beyond that. The text recommendation is between 2,000
+and 32,000 tokens; each supplied image adds 512. Summaries below five times that
+recommendation are accepted. At or above five times, DCP rejects the reply and
+makes one correction request to the same model using the same selected sources
+and images. A second reply at or above that threshold fails and retains the
+original context.
+
+Before requesting a summary, DCP checks the estimated prompt, attached images
+and recommended reply against the summarizer model's actual context window.
+There is no fixed percentage margin. For images, an existing host `maxTokens`
+is capped by the estimated remaining window; an absent field stays absent.
+
+Before saving a compression batch, DCP renders the proposed context through its
+normal pruning path and estimates the retained history, new summaries and
+protected content. It includes system overhead calibrated from reported usage
+and the existing reply reserve. If that total exceeds the main model's window,
+the batch is rejected before persistence and the original context is retained.
 
 ### Commands
 

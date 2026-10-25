@@ -71,10 +71,39 @@ test("released blocks keep suppressing sources without a summary or nudge entry"
     assert.equal(state.prune.messages.activeBlockIds.has(1), true)
     assert.equal(state.prune.messages.activeByAnchorMessageId.has("m1"), false)
     assert.deepEqual(state.prune.messages.byMessageId.get("m1")?.activeBlockIds, [1])
-    assert.doesNotMatch(
-        buildCompressedBlockGuidance(state),
-        /Active compressed blocks in this session: 1/,
+    const guidance = buildCompressedBlockGuidance(state)
+    assert.match(
+        guidance,
+        /Active compressed blocks in this session: 0 \(none; summary-bearing only\)/,
     )
+    assert.match(guidance, /Released ranges \(hidden, no summary\): 1/)
+    assert.doesNotMatch(guidance, /Active compressed blocks in this session: 1/)
+})
+
+test("nudge separates summary-bearing blocks from released ranges", () => {
+    const state = createSessionState("compact")
+    state.prune.messages.blocksById.set(1, block({ released: true }))
+    state.prune.messages.blocksById.set(
+        2,
+        block({
+            blockId: 2,
+            runId: 2,
+            anchorMessageId: "m2",
+            startId: "m2",
+            endId: "m2",
+            directMessageIds: ["m2"],
+            effectiveMessageIds: ["m2"],
+        }),
+    )
+    state.prune.messages.activeBlockIds.add(1)
+    state.prune.messages.activeBlockIds.add(2)
+
+    const guidance = buildCompressedBlockGuidance(state)
+    assert.match(
+        guidance,
+        /Active compressed blocks in this session: 1 \(@b2@; summary-bearing only\)/,
+    )
+    assert.match(guidance, /Released ranges \(hidden, no summary\): 1/)
 })
 
 test("search context hides released sources and their summaries from selection", () => {

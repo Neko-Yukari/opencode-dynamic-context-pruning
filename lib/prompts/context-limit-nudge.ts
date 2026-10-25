@@ -35,7 +35,7 @@ If no safely closed range exists, continue useful work without forcing compressi
 For context reduction, a prose recap in chat does not replace the compress tool or free context space. User-requested summaries are unaffected.
 
 SELECTION FOLLOW-UP
-If a completed block is no longer needed at all, dcp_release removes it from context one-way. Inspect it first with or dcp_read: release cannot be undone.
+
 
 ON FAILURE
 If compression fails, the original context is retained. Report the diagnostic; do not substitute a summary of your own.

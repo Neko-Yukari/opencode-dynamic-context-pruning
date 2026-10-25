@@ -41,10 +41,6 @@ export function buildPriorityMap(
         }
 
         const rawMessageId = message.info.id
-        if (typeof rawMessageId !== "string" || rawMessageId.length === 0) {
-            continue
-        }
-
         const ref = state.messageIds.byRawId.get(rawMessageId)
         if (!ref) {
             continue
@@ -81,13 +77,8 @@ export function listPriorityRefsBeforeIndex(
 ): string[] {
     const refs: string[] = []
     const seen = new Set<string>()
-    const upperBound = Math.max(0, Math.min(anchorIndex, messages.length))
-
-    for (let index = 0; index < upperBound; index++) {
-        const rawMessageId = messages[index]?.info.id
-        if (typeof rawMessageId !== "string") {
-            continue
-        }
+    for (let index = 0; index < anchorIndex; index++) {
+        const rawMessageId = messages[index]!.info.id
 
         const entry = priorities.get(rawMessageId)
         if (!entry || entry.priority !== priority || seen.has(entry.ref)) {

@@ -248,6 +248,7 @@ test("command execute exits after effective permission resolves to deny", async 
     const handler = createCommandExecuteHandler(
         {
             session: {
+                get: async () => ({ data: {} }),
                 messages: async () => {
                     sessionMessagesCalls += 1
                     return { data: [] }

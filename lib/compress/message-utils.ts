@@ -217,12 +217,7 @@ function resolveMessage(
 
     const messageId = state.messageIds.byRef.get(parsed.ref)
     const rawMessage = messageId ? searchContext.rawMessagesById.get(messageId) : undefined
-    if (
-        !messageId ||
-        !rawMessage ||
-        !searchContext.rawIndexById.has(messageId) ||
-        isIgnoredUserMessage(rawMessage)
-    ) {
+    if (!messageId || !rawMessage || isIgnoredUserMessage(rawMessage)) {
         throw new SoftIssue("not-in-context", parsed.ref, "not in context")
     }
 

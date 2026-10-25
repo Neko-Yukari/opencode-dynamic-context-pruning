@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { generateSummary, summaryBudget } from "../lib/compress/model"
-import { CompressionMedia } from "../lib/compress/media"
 import { SummaryFailure } from "../lib/compress/errors"
 import type { ToolContext } from "../lib/compress/types"
 import { countTokens } from "../lib/token-utils"
@@ -17,15 +16,12 @@ const model = "magpie/tyai/deepseek-v4.1-flash#high"
 const source = "SRC-EVIDENCE " + "Evidence line. ".repeat(200)
 const estimateOf = (text: string) =>
     Math.ceil(Math.max(countTokens(text) * 1.5, Buffer.byteLength(text, "utf8") / 3))
-const budgetOf = summaryBudget(estimateOf(source))
-const validJson = (summary = "Fixed summary with constraints and open work.") =>
-    JSON.stringify({ summary, complete: true })
+const summaryText = (summary = "Fixed summary with constraints and open work.") => summary
 
 type Call = {
     prompt: string
     model: { providerID: string; id: string; variant?: string }
     images?: unknown[]
-    imageBudget?: { context: number; input: number; output: number; summary: number }
 }
 
 function fixture(options: {
@@ -36,7 +32,6 @@ function fixture(options: {
     ) => Promise<{ text: string }> | { text: string }
     context?: number
     output?: number
-    image?: boolean
     timeout?: number
     fallbackModels?: string[]
 }) {
@@ -48,7 +43,6 @@ function fixture(options: {
             id: "tyai/deepseek-v4.1-flash",
             limit: { context: options.context ?? 200_000, output: options.output ?? 32_000 },
             variants: [{ id: "high" }],
-            ...(options.image ? { capabilities: { input: ["text", "image"] } } : {}),
         },
         {
             providerID: "backup",
@@ -87,193 +81,128 @@ async function rejection(promise: Promise<unknown>): Promise<Error> {
     throw new Error("expected rejection")
 }
 
-test("malformed JSON is corrected once with the full source and same model", async () => {
-    const replies = ['{"summary":"truncated', validJson()]
-    const { ctx, calls, signals } = fixture({
-        respond: (_, call) => ({ text: replies[call - 1]! }),
-    })
-
-    const summary = await generateSummary(ctx, "Topic", source, new AbortController().signal)
-
-    assert.equal(summary, "Fixed summary with constraints and open work.")
-    assert.equal(calls.length, 2)
-    assert.deepEqual(calls[1]!.model, calls[0]!.model)
-    // The correction shares the first attempt's controller and its deadline.
-    assert.equal(signals[1], signals[0])
-    const correction = calls[1]!.prompt
-    assert.match(correction, /CORRECTION \(not source data\)/)
-    assert.match(correction, /not parseable as one complete JSON object/)
-    assert.match(correction, /do not continue, complete, or append to a partial reply/)
-    assert.match(correction, /anthropic tokenizer tokens x 1\.5, UTF-8 byte length \/ 3/i)
-    assert.match(correction, new RegExp(`within ${budgetOf} tokens`))
-    // Instructions are emitted before SOURCE_JSON and the source itself is unchanged.
-    assert.ok(correction.indexOf("CORRECTION") < correction.indexOf("SOURCE_JSON"))
-    assert.equal(correction.split(source).length - 1, 1)
-    assert.equal(calls[0]!.prompt.split(source).length - 1, 1)
-})
-
-test("the exact object contract is corrected once per bad shape", async () => {
-    for (const bad of [
-        '{"summary":"value","complete":false}',
-        '{"summary":"value","complete":true,"extra":1}',
-        '{"summary":"","complete":true}',
-        '["not","an","object"]',
-    ]) {
-        const replies = [bad, validJson()]
-        const { ctx, calls } = fixture({ respond: (_, call) => ({ text: replies[call - 1]! }) })
-        const summary = await generateSummary(ctx, "Topic", source, new AbortController().signal)
-        assert.equal(summary, "Fixed summary with constraints and open work.", bad)
-        assert.equal(calls.length, 2, bad)
-        const correction = calls[1]!.prompt
-        assert.match(correction, /did not match the required object/, bad)
-        assert.match(correction, /"summary" must be a nonempty string/, bad)
-        assert.match(correction, /no other keys are allowed/, bad)
-        assert.match(correction, /Regenerate the whole object/, bad)
-    }
-})
-
-test("an oversized summary is corrected with the measured estimate and budget", async () => {
-    const oversized = "word ".repeat(4_000)
-    const measured = estimateOf(oversized)
-    assert.ok(measured > budgetOf)
-    const replies = [JSON.stringify({ summary: oversized, complete: true }), validJson()]
-    const { ctx, calls } = fixture({ respond: (_, call) => ({ text: replies[call - 1]! }) })
-
-    const summary = await generateSummary(ctx, "Topic", source, new AbortController().signal)
-
-    assert.equal(summary, "Fixed summary with constraints and open work.")
-    assert.equal(calls.length, 2)
-    const correction = calls[1]!.prompt
-    assert.match(correction, new RegExp(`measured ${measured} tokens`))
-    assert.match(correction, new RegExp(`over the ${budgetOf} token limit`))
-    assert.match(correction, /Rewrite a substantially shorter summary/)
-    assert.match(correction, /truncating sentences, dropping key facts/)
-    assert.match(correction, /existing block references/)
-    assert.match(correction, /"summary" \(nonempty string\) and "complete": true/)
-    // The failed provider reply is never copied into the next prompt.
-    assert.doesNotMatch(correction, /word word word/)
-})
-
-test("a second validation failure stops after two calls", async () => {
-    for (const [first, second, expected] of [
-        ['{"summary":"truncated', '{"summary":"still', /malformed or truncated JSON/],
-        [
-            '{"summary":"truncated',
-            JSON.stringify({ summary: "word ".repeat(4_000), complete: true }),
-            /summary exceeds output budget/,
-        ],
-        ['{"summary":"value","complete":false}', "not json", /malformed or truncated JSON/],
-        [
-            '{"summary":"value","complete":false}',
-            '{"summary":"value","complete":false}',
-            /did not match the required summary object/,
-        ],
-    ] as const) {
-        const replies = [first, second]
-        const { ctx, calls } = fixture({ respond: (_, call) => ({ text: replies[call - 1]! }) })
-        const error = await rejection(
-            generateSummary(ctx, "Topic", source, new AbortController().signal),
-        )
-        assert.match(error.message, expected)
-        assert.equal(calls.length, 2)
-    }
-})
-
-test("a valid first reply makes no correction call", async () => {
-    const { ctx, calls } = fixture({ respond: () => ({ text: validJson() }) })
+test("a valid reply returns the summary with one call", async () => {
+    const { ctx, calls } = fixture({ respond: () => ({ text: summaryText() }) })
     const summary = await generateSummary(ctx, "Topic", source, new AbortController().signal)
     assert.equal(summary, "Fixed summary with constraints and open work.")
     assert.equal(calls.length, 1)
     assert.doesNotMatch(calls[0]!.prompt, /CORRECTION/)
+    assert.match(calls[0]!.prompt, /recommendation, not a strict maximum/)
+    assert.match(calls[0]!.prompt, /Return only the summary body/)
+    assert.doesNotMatch(calls[0]!.prompt, /Return one JSON object/)
 })
 
-test("final output rejection distinguishes budget overflow from an invalid object", async () => {
-    const oversized = "word ".repeat(4_000)
-    const tooLong = fixture({
-        respond: () => ({ text: JSON.stringify({ summary: oversized, complete: true }) }),
-    })
-    const overflow = await rejection(
-        generateSummary(tooLong.ctx, "Topic", source, new AbortController().signal),
+test("a summary above the recommendation is accepted", async () => {
+    const summary = "word ".repeat(2_000)
+    assert.ok(estimateOf(summary) > summaryBudget(estimateOf(source)))
+    const { ctx, calls } = fixture({ respond: () => ({ text: summaryText(summary) }) })
+    assert.equal(
+        await generateSummary(ctx, "Topic", source, new AbortController().signal),
+        summary.trim(),
     )
-    assert.match(overflow.message, /summary exceeds output budget/)
-    assert.match(overflow.message, new RegExp(`estimate=${estimateOf(oversized)}`))
-    assert.match(overflow.message, new RegExp(`limit=${budgetOf}`))
-    assert.match(overflow.message, /original context retained/)
-    assert.equal(tooLong.calls.length, 2)
-
-    const invalid = fixture({
-        respond: () => ({ text: '{"summary":"value","complete":false}' }),
-    })
-    const schema = await rejection(
-        generateSummary(invalid.ctx, "Topic", source, new AbortController().signal),
-    )
-    assert.match(schema.message, /did not match the required summary object/)
-    assert.doesNotMatch(schema.message, /oversized|exceeds output budget/)
-    assert.equal(invalid.calls.length, 2)
+    assert.equal(calls.length, 1)
 })
 
-test("the correction re-estimates the image input budget and keeps images and model", async () => {
-    const bytes = Buffer.alloc(33)
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
-    bytes.writeUInt32BE(13, 8)
-    bytes.write("IHDR", 12)
-    bytes.writeUInt32BE(8, 16)
-    bytes.writeUInt32BE(8, 20)
-    bytes[24] = 8
-    bytes[25] = 2
-    const media = new CompressionMedia()
-    const text = JSON.stringify(
-        media.transform({
-            messages: [
-                {
-                    id: "m1",
-                    role: "user",
-                    content: [
-                        {
-                            type: "file",
-                            uri: `data:image/png;base64,${bytes.toString("base64")}`,
-                            mime: "image/png",
-                        },
-                    ],
-                },
-            ],
-            blocks: [],
-        }),
-    )
-    const replies = ['{"summary":"truncated', validJson()]
+test("a summary just below five times the recommendation is accepted once", async () => {
+    const budget = summaryBudget(estimateOf(source))
+    const summary = "x".repeat(budget * 15 - 3)
+    assert.equal(estimateOf(summary), budget * 5 - 1)
+    const { ctx, calls } = fixture({ respond: () => ({ text: summaryText(summary) }) })
+    assert.equal(await generateSummary(ctx, "Topic", source, new AbortController().signal), summary)
+    assert.equal(calls.length, 1)
+})
+
+test("a summary at or above five times the recommendation gets one correction prompt", async () => {
+    const budget = summaryBudget(estimateOf(source))
+    for (const extra of [0, 3]) {
+        const summary = "x".repeat(budget * 15 + extra)
+        assert.equal(estimateOf(summary), budget * 5 + extra / 3)
+        const { ctx, calls } = fixture({
+            respond: (_input, call) => ({
+                text: summaryText(call === 1 ? summary : "Corrected facts."),
+            }),
+        })
+        assert.equal(
+            await generateSummary(ctx, "Topic", source, new AbortController().signal),
+            "Corrected facts.",
+        )
+        assert.equal(calls.length, 2)
+        assert.deepEqual(calls[1]!.model, calls[0]!.model)
+        assert.ok(calls[1]!.prompt.includes(`SOURCE_JSON\n${source}`))
+        assert.match(calls[1]!.prompt, /LENGTH_CORRECTION/)
+        assert.ok(calls[1]!.prompt.includes(`recommendation=${budget}`))
+        assert.ok(calls[1]!.prompt.includes(`threshold=${budget * 5}`))
+        assert.match(calls[1]!.prompt, /Return only the summary body/)
+    }
+})
+
+test("a second fivefold summary is rejected without another retry or model switch", async () => {
+    const budget = summaryBudget(estimateOf(source))
     const { ctx, calls } = fixture({
-        respond: (_, call) => ({ text: replies[call - 1]! }),
-        image: true,
+        fallbackModels: ["backup/model#high"],
+        respond: () => ({ text: summaryText("x".repeat(budget * 15)) }),
     })
-
-    await generateSummary(ctx, "Topic", { text, media }, new AbortController().signal)
-
+    const error = await rejection(
+        generateSummary(ctx, "Topic", source, new AbortController().signal),
+    )
+    assert.match(error.message, /five times the recommendation/)
+    assert.match(error.message, /original context retained/)
     assert.equal(calls.length, 2)
-    assert.equal(calls[0]!.imageBudget!.input, estimateOf(calls[0]!.prompt))
-    assert.equal(calls[1]!.imageBudget!.input, estimateOf(calls[1]!.prompt))
-    assert.ok(calls[1]!.imageBudget!.input > calls[0]!.imageBudget!.input)
-    assert.equal(calls[1]!.imageBudget!.summary, calls[0]!.imageBudget!.summary)
-    assert.equal(calls[1]!.imageBudget!.context, calls[0]!.imageBudget!.context)
-    assert.deepEqual(calls[1]!.images, calls[0]!.images)
-    assert.deepEqual(calls[1]!.model, calls[0]!.model)
+    assert.deepEqual(
+        calls.map((call) => call.model.providerID),
+        ["magpie", "magpie"],
+    )
 })
 
-test("capacity, cancellation, timeout, provider and guarded failures add no correction", async () => {
-    const big = "text ".repeat(20_000)
-    const capacity = fixture({
-        respond: () => ({ text: validJson() }),
-        context: 64_000,
-        output: 60_000,
+test("a correction request is checked against the remaining model window before sending", async () => {
+    const baseline = fixture({ respond: () => ({ text: summaryText() }) })
+    await generateSummary(baseline.ctx, "Topic", source, new AbortController().signal)
+    const budget = summaryBudget(estimateOf(source))
+    const context = estimateOf(baseline.calls[0]!.prompt) + budget
+    const { ctx, calls } = fixture({
+        context,
+        fallbackModels: ["backup/model#high"],
+        respond: () => ({ text: summaryText("x".repeat(budget * 15)) }),
     })
-    const capacityError = await rejection(
-        generateSummary(capacity.ctx, "Topic", big, new AbortController().signal),
+    const error = await rejection(
+        generateSummary(ctx, "Topic", source, new AbortController().signal),
     )
-    assert.match(capacityError.message, /exceeds safe context budget/)
-    assert.equal(capacity.calls.length, 0)
+    assert.match(error.message, /request exceeds model context/)
+    assert.match(error.message, /original context retained/)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0]!.model.providerID, "magpie")
+})
 
+test("an empty summary fails once with the original context retained", async () => {
+    for (const reply of ["", "   "]) {
+        const { ctx, calls } = fixture({ respond: () => ({ text: reply }) })
+        const error = await rejection(
+            generateSummary(ctx, "Topic", source, new AbortController().signal),
+        )
+        assert.match(error.message, /no nonempty summary; original context retained/)
+        assert.equal(calls.length, 1)
+    }
+})
+
+test("empty output never switches models even when a fallback is configured", async () => {
+    const failing = fixture({
+        fallbackModels: ["backup/model#high"],
+        respond: () => ({ text: "" }),
+    })
+    const error = await rejection(
+        generateSummary(failing.ctx, "Topic", source, new AbortController().signal),
+    )
+    assert.match(error.message, /no nonempty summary/)
+    assert.deepEqual(
+        failing.calls.map((call) => call.model.providerID),
+        ["magpie"],
+    )
+})
+
+test("cancellation, timeout, provider and host failures fail once", async () => {
     const aborted = new AbortController()
     aborted.abort(new Error("cancelled"))
-    const cancellation = fixture({ respond: () => ({ text: validJson() }) })
+    const cancellation = fixture({ respond: () => ({ text: summaryText() }) })
     await rejection(generateSummary(cancellation.ctx, "Topic", source, aborted.signal))
     assert.equal(cancellation.calls.length, 0)
 
@@ -317,112 +246,17 @@ test("capacity, cancellation, timeout, provider and guarded failures add no corr
     assert.equal(guarded.calls.length, 1)
 })
 
-test("output failures never switch models even when a fallback is configured", async () => {
-    const failing = fixture({
-        fallbackModels: ["backup/model#high"],
-        respond: (_, call) => ({
-            text: call === 1 ? '{"summary":"truncated' : '{"summary":"still',
-        }),
-    })
-    const error = await rejection(
-        generateSummary(failing.ctx, "Topic", source, new AbortController().signal),
-    )
-    assert.match(error.message, /malformed or truncated JSON/)
-    assert.deepEqual(
-        failing.calls.map((call) => call.model.providerID),
-        ["magpie", "magpie"],
-    )
-})
-
-test("one correction is shared with a fallback that fails validation", async () => {
-    // primary bad JSON -> correction request hits a provider error -> fallback bad JSON
-    const { ctx, calls } = fixture({
-        fallbackModels: ["backup/model#high"],
-        respond: (_, call) => {
-            if (call === 1) return { text: '{"summary":"truncated' }
-            if (call === 2) throw { _tag: "ProviderError", status: 429 }
-            return { text: '{"summary":"backup also bad' }
-        },
-    })
-    const error = await rejection(
-        generateSummary(ctx, "Topic", source, new AbortController().signal),
-    )
-    assert.equal(calls.length, 3)
-    assert.deepEqual(
-        calls.map((call) => call.model.providerID),
-        ["magpie", "magpie", "backup"],
-    )
-    assert.deepEqual(
-        calls.map((call) => /CORRECTION/.test(call.prompt)),
-        [false, true, false],
-    )
-    assert.match(error.message, /malformed or truncated JSON/)
-
-    // Same path with a valid fallback reply: the third call is still the base prompt.
-    const recovered = fixture({
-        fallbackModels: ["backup/model#high"],
-        respond: (_, call) => {
-            if (call === 1) return { text: '{"summary":"truncated' }
-            if (call === 2) throw { _tag: "ProviderError", status: 429 }
-            return { text: validJson("Backup summary.") }
-        },
-    })
-    const summary = await generateSummary(
-        recovered.ctx,
-        "Topic",
-        source,
-        new AbortController().signal,
-    )
-    assert.equal(summary, "Backup summary.")
-    assert.equal(recovered.calls.length, 3)
-    assert.deepEqual(
-        recovered.calls.map((call) => /CORRECTION/.test(call.prompt)),
-        [false, true, false],
-    )
-    assert.deepEqual(
-        recovered.calls.map((call) => call.model.providerID),
-        ["magpie", "magpie", "backup"],
-    )
-})
-
-test("cancellation after a bad first reply does not start the correction", async () => {
+test("cancellation while a provider reply arrives propagates the caller reason", async () => {
     const caller = new AbortController()
     const { ctx, calls } = fixture({
         respond: () => {
             caller.abort(new Error("cancelled by caller"))
-            return { text: '{"summary":"truncated' }
+            return { text: "" }
         },
     })
     const error = await rejection(generateSummary(ctx, "Topic", source, caller.signal))
     assert.match(error.message, /cancelled by caller/)
     assert.equal(calls.length, 1)
-})
-
-test("the text correction is rejected when the re-estimated prompt overflows", async () => {
-    // Measure the base and corrected prompt sizes from one real run.
-    const measured = fixture({
-        respond: (_, call) => ({ text: call === 2 ? validJson() : '{"summary":"truncated' }),
-    })
-    await generateSummary(measured.ctx, "Topic", source, new AbortController().signal)
-    const base = estimateOf(measured.calls[0]!.prompt)
-    const corrected = estimateOf(measured.calls[1]!.prompt)
-    assert.ok(corrected > base + 100)
-    const output = 1_000
-    const context = Math.ceil((base + output + 100) / 0.8)
-    assert.ok(base + output <= Math.floor(context * 0.8))
-    assert.ok(corrected + output > Math.floor(context * 0.8))
-
-    const replies = ['{"summary":"truncated', validJson()]
-    const limited = fixture({
-        context,
-        output,
-        respond: (_, call) => ({ text: replies[call - 1]! }),
-    })
-    const error = await rejection(
-        generateSummary(limited.ctx, "Topic", source, new AbortController().signal),
-    )
-    assert.match(error.message, /exceeds safe context budget/)
-    assert.equal(limited.calls.length, 1)
 })
 
 test("provider errors still fall back in order", async () => {
@@ -431,7 +265,7 @@ test("provider errors still fall back in order", async () => {
         respond: (input, call) => {
             if (call === 1) throw { _tag: "ProviderError", status: 429 }
             assert.equal(input.model.id, "model")
-            return { text: validJson() }
+            return { text: summaryText() }
         },
     })
     const summary = await generateSummary(

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { generateSummary, summaryBudget } from "../lib/compress/model"
 import { CompressionMedia } from "../lib/compress/media"
-import type { SummaryImageBudget, ToolContext } from "../lib/compress/types"
+import type { ToolContext } from "../lib/compress/types"
 import { countTokens } from "../lib/token-utils"
 
 const dataHome = mkdtempSync(join(tmpdir(), "dcp-budget-tests-"))
@@ -14,22 +14,34 @@ after(() => rmSync(dataHome, { recursive: true, force: true }))
 
 test("summary budgets accrue continuously across source size bands", () => {
     for (const [size, expected] of [
-        [0, 1_200],
-        [8_000, 1_200],
-        [20_000, 3_000],
-        [20_001, 3_000],
-        [50_000, 6_600],
-        [100_000, 12_600],
-        [100_001, 12_600],
-        [200_000, 20_600],
-        [242_500, 24_000],
-        [300_000, 24_000],
+        [0, 2_000],
+        [8_000, 2_000],
+        [20_000, 4_000],
+        [20_001, 4_000],
+        [50_000, 8_500],
+        [100_000, 16_000],
+        [100_001, 16_000],
+        [200_000, 26_000],
+        [260_000, 32_000],
+        [300_000, 32_000],
     ]) {
         assert.equal(summaryBudget(size!), expected)
     }
     for (let size = 0; size <= 300_000; size++) {
         assert.ok(summaryBudget(size + 1) >= summaryBudget(size), `budget decreased at ${size}`)
     }
+})
+
+test("inspected images add linearly to the capped text recommendation", () => {
+    assert.equal(summaryBudget(0, 1), 2_512)
+    assert.equal(summaryBudget(50_000, 2), 9_524)
+    assert.equal(summaryBudget(200_000, 7), 29_584)
+    assert.equal(summaryBudget(260_000, 7), 35_584)
+})
+
+test("the recent rejected summary lengths fit the increased text allowances", () => {
+    assert.ok(summaryBudget(0) >= 1_649)
+    assert.ok(summaryBudget(19_620) >= 3_789)
 })
 
 test("summary generation uses the accrued budget for the production source estimate", async () => {
@@ -46,12 +58,9 @@ test("summary generation uses the accrued budget for the production source estim
                 { providerID: "test", id: "model", limit: { context: 1_000_000, output: 32_000 } },
             ],
             generate: async (input: { prompt: string }) => {
-                requestedBudget = Number(/in at most (\d+) tokens/.exec(input.prompt)![1])
+                requestedBudget = Number(/Aim for about (\d+) tokens/.exec(input.prompt)![1])
                 return {
-                    text: JSON.stringify({
-                        summary: "Verified result; follow-up remains open.",
-                        complete: true,
-                    }),
+                    text: "Verified result; follow-up remains open.",
                 }
             },
         },
@@ -81,6 +90,29 @@ test("inline image examples in source text are preserved when their base64 is no
     )
 })
 
+test("a valid data URI quoted in text stays reference-only until an attachment reuses it", () => {
+    const bytes = Buffer.alloc(33)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
+    bytes.writeUInt32BE(13, 8)
+    bytes.write("IHDR", 12)
+    bytes.writeUInt32BE(8, 16)
+    bytes.writeUInt32BE(8, 20)
+    bytes[24] = 8
+    bytes[25] = 2
+    const uri = `data:image/png;base64,${bytes.toString("base64")}`
+    const media = new CompressionMedia()
+    const mapped = media.transform(`Example: ${uri}`)
+    assert.notEqual(mapped, `Example: ${uri}`)
+    // Quoted documentation bytes are not evidence the summarizer inspected.
+    assert.deepEqual(media.images(), [])
+    // A real attachment using the same locator promotes it for inference.
+    media.transform({ type: "file", uri, mime: "image/png" })
+    const images = media.images()
+    assert.equal(images.length, 1)
+    assert.equal(images[0]!.mime, "image/png")
+    assert.equal(images[0]!.uri, uri)
+})
+
 test("image URLs and file paths embedded in text remain references rather than attachments", () => {
     const media = new CompressionMedia()
     const remote = "https://example.com/documentation.jpg"
@@ -102,7 +134,7 @@ test("image URLs and file paths embedded in text remain references rather than a
     assert.deepEqual(media.images(), [{ ref: file, uri: file, mime: "image/png" }])
 })
 
-test("image sources pass an internal budget instead of a full output reserve", async () => {
+test("images are passed with the real model window capacity", async () => {
     const bytes = Buffer.alloc(33)
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
     bytes.writeUInt32BE(13, 8)
@@ -133,7 +165,17 @@ test("image sources pass an internal budget instead of a full output reserve", a
     const sourceEstimate = Math.ceil(
         Math.max(countTokens(text) * 1.5, Buffer.byteLength(text, "utf8") / 3),
     )
-    let seen: { imageBudget?: SummaryImageBudget; images: number; legacyLimit: boolean } | undefined
+    const visualSummary = "word ".repeat(1_300)
+    let calls = 0
+    let seen:
+        | {
+              capacity?: { contextWindow: number; outputLimit: number; recommendation: number }
+              hasBudget: boolean
+              images: number
+              legacyLimit: boolean
+              prompt: string
+          }
+        | undefined
     const context = {
         config: { compress: { model: "test/model", modelTimeoutMs: 5_000 } },
         logger: { info() {} },
@@ -147,18 +189,20 @@ test("image sources pass an internal budget instead of a full output reserve", a
                 },
             ],
             generate: async (input: {
-                imageBudget?: SummaryImageBudget
+                capacity?: { contextWindow: number; outputLimit: number; recommendation: number }
                 images?: unknown[]
                 prompt: string
             }) => {
+                calls++
                 seen = {
-                    imageBudget: input.imageBudget,
+                    capacity: input.capacity,
+                    hasBudget: "imageBudget" in input,
                     images: input.images?.length ?? 0,
                     legacyLimit: "imageTokenLimit" in input,
+                    prompt: input.prompt,
                 }
                 return {
-                    text: JSON.stringify({ summary: "Image evidence retained.", complete: true }),
-                    imageTokens: 1_028,
+                    text: visualSummary,
                 }
             },
         },
@@ -171,13 +215,19 @@ test("image sources pass an internal budget instead of a full output reserve", a
         new AbortController().signal,
     )
 
-    // 60000 output exceeds the 51200 safe window, so a full reserve would refuse
-    // every image request; the adapter now receives the parts of the budget instead.
+    // The real model window crosses the boundary; the advisory recommendation
+    // includes the image allowance and there is no obsolete internal budget.
+    assert.equal(calls, 1)
     assert.equal(seen?.images, 1)
     assert.equal(seen?.legacyLimit, false)
-    assert.equal(seen?.imageBudget?.context, 51_200)
-    assert.equal(seen?.imageBudget?.output, 60_000)
-    assert.equal(seen?.imageBudget?.summary, summaryBudget(sourceEstimate))
-    assert.ok(seen!.imageBudget!.input >= sourceEstimate)
+    assert.equal(seen?.hasBudget, false)
+    assert.equal(seen?.capacity?.contextWindow, 64_000)
+    assert.equal(seen?.capacity?.outputLimit, 60_000)
+    assert.equal(seen?.capacity?.recommendation, summaryBudget(sourceEstimate, 1))
+    assert.match(
+        seen!.prompt,
+        new RegExp(`Aim for about ${summaryBudget(sourceEstimate, 1)} tokens`),
+    )
+    assert.ok(summary.startsWith(visualSummary.trim()))
     assert.match(summary, /Media references retained \(images supplied to summarizer/)
 })

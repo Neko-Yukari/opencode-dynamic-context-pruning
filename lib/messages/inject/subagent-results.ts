@@ -28,9 +28,7 @@ export const injectExtendedSubAgentResults = async (
     }
 
     for (const message of messages) {
-        const parts = Array.isArray(message.parts) ? message.parts : []
-
-        for (const part of parts) {
+        for (const part of message.parts) {
             if (part.type !== "tool" || !["task", "subagent"].includes(part.tool) || !part.callID) {
                 continue
             }

@@ -36,10 +36,10 @@ import { MODEL_SELECTION_INSTRUCTIONS } from "../compress/model"
 import { nativeToolSignal } from "./cancellation"
 import { createSummarizer } from "./summarizer"
 import { createReadbackTool } from "../readback"
-import { createNotes } from "../notes"
+import { consumeNoteInjection, createNotes } from "../notes"
 import { createReleaseTool } from "../release"
 import { createFullHistoryReader } from "./full-history"
-import { injectSessionNote, NOTE_INSTRUCTIONS, noteReviewKey } from "./note-context"
+import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
@@ -64,7 +64,7 @@ export async function setup(ctx: Plugin.Context) {
         return
     }
     const logger = new Logger(config.debug)
-    const notes = createNotes(ctx.storage, ctx.location.directory)
+    const notes = createNotes(ctx.storage)
     const fullHistory = createFullHistoryReader(ctx)
     const prompts = new PromptStore(
         logger,
@@ -80,7 +80,6 @@ export async function setup(ctx: Plugin.Context) {
         prompts.getRuntimePrompts = () => ({ ...original(), system: MODEL_SELECTION_INSTRUCTIONS })
     }
     const sessions = new Map<string, SessionState>()
-    const queues = new Map<string, Promise<unknown>>()
     const limits = new Map<string, { context: number; output?: number }>()
     const aliases: Record<string, string> = {
         task: "subagent",
@@ -95,17 +94,6 @@ export async function setup(ctx: Plugin.Context) {
     ]) {
         for (const name of [...list])
             if (aliases[name] && !list.includes(aliases[name]!)) list.push(aliases[name]!)
-    }
-
-    function serial<T>(sessionID: string, operation: () => Promise<T>): Promise<T> {
-        const pending = (queues.get(sessionID) ?? Promise.resolve()).catch(() => {}).then(operation)
-        queues.set(sessionID, pending)
-        void pending
-            .finally(() => {
-                if (queues.get(sessionID) === pending) queues.delete(sessionID)
-            })
-            .catch(() => {})
-        return pending
     }
 
     const client = {
@@ -192,93 +180,84 @@ export async function setup(ctx: Plugin.Context) {
             })
     })
     for (const kind of ["context", "compaction"] as const)
-        await ctx.session.hook(kind, (event) =>
-            serial(event.sessionID, async () => {
-                const { state, entries, session, messages } = await load(
-                    event.sessionID,
-                    event.agent,
-                )
-                if (state.isSubAgent && !config.experimental.allowSubAgents) {
-                    delete event.tools.compress
-                    delete event.tools.dcp_read
-                    delete event.tools.dcp_release
-                    delete event.tools.dcp_note
-                    return
-                }
-                if (state.compressPermission === "deny") {
-                    delete event.tools.compress
-                    delete event.tools.dcp_release
-                    delete event.tools.dcp_note
-                }
-                const limit = limits.get(`${event.model.providerID}/${event.model.id}`)
-                state.modelContextLimit = limit?.context
-                state.modelOutputLimit = limit?.output
-                state.systemPromptTokens = countTokens(
-                    event.system.map((part) => part.text).join("\n"),
-                )
-                const view = project(event.messages, entries, {
-                    ...session,
-                    agent: event.agent,
-                    model: event.model,
-                })
-                stripHallucinations(view.messages, state.idFormat)
-                const assignedRefs = assignMessageRefs(state, view.messages)
-                if (assignedRefs > 0) await saveSessionState(state, logger, undefined, true)
-                // Compaction may select only a prefix; block origins can be in the retained tail.
-                syncCompressionBlocks(state, logger, messages)
-                syncToolCache(state, config, logger, view.messages)
-                buildToolIdList(state, view.messages)
-                prune(state, logger, config, view.messages, view.summaryBase)
-                await injectExtendedSubAgentResults(
-                    client,
-                    state,
-                    logger,
-                    view.messages,
-                    config.experimental.allowSubAgents,
-                )
-                const priorities = buildPriorityMap(config, state, view.messages)
-                prompts.reload()
-                injectCompressNudges(
-                    state,
-                    config,
-                    logger,
-                    view.messages,
-                    prompts.getRuntimePrompts(),
-                    priorities,
-                    kind === "context",
-                )
-                injectMessageIds(state, config, view.messages, priorities)
-                applyPendingManualTrigger(state, view.messages, logger)
-                event.messages = view.restore()
+        await ctx.session.hook(kind, async (event) => {
+            const { state, entries, session, messages } = await load(event.sessionID, event.agent)
+            if (state.isSubAgent && !config.experimental.allowSubAgents) {
+                delete event.tools.compress
+                delete event.tools.dcp_read
+                delete event.tools.dcp_release
+                delete event.tools.dcp_note
+                return
+            }
+            if (state.compressPermission === "deny") {
+                delete event.tools.compress
+                delete event.tools.dcp_release
+                delete event.tools.dcp_note
+            }
+            const limit = limits.get(`${event.model.providerID}/${event.model.id}`)
+            state.modelContextLimit = limit?.context
+            state.modelOutputLimit = limit?.output
+            state.systemPromptTokens = countTokens(event.system.map((part) => part.text).join("\n"))
+            const view = project(event.messages, entries, {
+                ...session,
+                agent: event.agent,
+                model: event.model,
+            })
+            stripHallucinations(view.messages, state.idFormat)
+            const assignedRefs = assignMessageRefs(state, view.messages)
+            if (assignedRefs > 0) await saveSessionState(state, logger)
+            // Compaction may select only a prefix; block origins can be in the retained tail.
+            syncCompressionBlocks(state, logger, messages)
+            syncToolCache(state, config, logger, view.messages)
+            buildToolIdList(state, view.messages)
+            prune(state, logger, config, view.messages, view.summaryBase)
+            await injectExtendedSubAgentResults(
+                client,
+                state,
+                logger,
+                view.messages,
+                config.experimental.allowSubAgents,
+            )
+            const priorities = buildPriorityMap(config, state, view.messages)
+            prompts.reload()
+            injectCompressNudges(
+                state,
+                config,
+                logger,
+                view.messages,
+                prompts.getRuntimePrompts(),
+                priorities,
+                kind === "context",
+            )
+            injectMessageIds(state, config, view.messages, priorities)
+            applyPendingManualTrigger(state, view.messages, logger)
+            event.messages = view.restore()
+            if (consumeNoteInjection(event.sessionID)) {
                 const note = await notes.get(event.sessionID)
-                event.messages = injectSessionNote(
-                    event.messages,
-                    event.sessionID,
-                    note?.content ?? "",
-                )
-                const system = { system: event.system.map((part) => part.text) }
-                await createSystemPromptHandler(
-                    state,
-                    logger,
-                    config,
-                    prompts,
-                )(
-                    {
-                        sessionID: event.sessionID,
-                        model: { limit: { context: state.modelContextLimit ?? 0 } },
-                    },
-                    system,
-                )
-                event.system = system.system.map((text, index) => ({
-                    ...event.system[index],
-                    type: "text",
-                    text,
-                }))
-                if (state.compressPermission !== "deny")
-                    event.system.push({ type: "text", text: NOTE_INSTRUCTIONS })
-                await logger.saveContext(event.sessionID, view.messages)
-            }),
-        )
+                event.messages = injectSessionNote(event.messages, event.sessionID, note?.content ?? "")
+            }
+            const system = { system: event.system.map((part) => part.text) }
+            await createSystemPromptHandler(
+                state,
+                logger,
+                config,
+                prompts,
+            )(
+                {
+                    sessionID: event.sessionID,
+                    model: { limit: { context: state.modelContextLimit ?? 0 } },
+                },
+                system,
+            )
+            event.system = system.system.map((text, index) => ({
+                ...event.system[index],
+                type: "text",
+                text,
+            }))
+            if (state.compressPermission !== "deny")
+                event.system.push({ type: "text", text: NOTE_INSTRUCTIONS })
+            await logger.saveContext(event.sessionID, view.messages)
+        })
 
     const defineReadback = (state: SessionState) =>
         createReadbackTool({
@@ -293,42 +272,37 @@ export async function setup(ctx: Plugin.Context) {
             name: "dcp_read",
             description: readback.description,
             input: tool.schema.object(readback.args),
-            options: { codemode: false, permission: "dcp_read" },
-            execute: (input, context) =>
-                serial(context.sessionID, async () => {
-                    const legacy = defineReadback(
-                        sessions.get(context.sessionID) ?? createSessionState("compact"),
-                    )
-                    const content = await legacy.execute(input, {
-                        sessionID: context.sessionID,
-                        messageID: context.messageID,
-                        agent: context.agent,
-                        directory: ctx.location.directory,
-                        worktree: ctx.location.directory,
-                        abort: nativeToolSignal(context) ?? new AbortController().signal,
-                        ask: async () => {
-                            if (!ctx.permission?.assert)
-                                throw new Error(
-                                    "DCP readback requires native permission.assert support",
-                                )
-                            await ctx.permission.assert({
-                                sessionID: context.sessionID,
-                                agent: context.agent,
-                                action: "dcp_read",
-                                resources: ["*"],
-                                source: {
-                                    type: "tool",
-                                    messageID: context.messageID,
-                                    id: context.id,
-                                },
-                            })
-                        },
-                        metadata: ({ title }: { title?: string }) => {
-                            void context.progress({ title })
-                        },
-                    })
-                    return { content: content as string }
-                }),
+            options: { codemode: true, permission: "dcp_read" },
+            execute: async (input, context) => {
+                const legacy = defineReadback(
+                    sessions.get(context.sessionID) ?? createSessionState("compact"),
+                )
+                const content = await legacy.execute(input, {
+                    sessionID: context.sessionID,
+                    messageID: context.messageID,
+                    agent: context.agent,
+                    directory: ctx.location.directory,
+                    worktree: ctx.location.directory,
+                    abort: nativeToolSignal(context) ?? new AbortController().signal,
+                    ask: async () => {
+                        await ctx.permission.assert({
+                            sessionID: context.sessionID,
+                            agent: context.agent,
+                            action: "dcp_read",
+                            resources: ["*"],
+                            source: {
+                                type: "tool",
+                                messageID: context.messageID,
+                                id: context.id,
+                            },
+                        })
+                    },
+                    metadata: ({ title }: { title?: string }) => {
+                        void context.progress({ title })
+                    },
+                })
+                return { content: content as string }
+            },
         }),
     )
 
@@ -337,27 +311,24 @@ export async function setup(ctx: Plugin.Context) {
             editor.add({
                 name: "dcp_note",
                 description:
-                    "Prepare the current session's continuation checkpoint before context reduction. The committed note is already included in context; normal work needs no note I/O. Read returns a fixed Markdown draft path for existing file tools. Write commits the reviewed draft, including when unchanged, before compress or dcp_release. Keep only facts needed after removal of the selected history. Successful commits or reductions need no follow-up note entry. About 8,000 characters is guidance, not a target or hard limit. Parent and child notes are separate.",
+                    "Prepare the current session's continuation checkpoint before context reduction. The note is injected once after each successful compression or release. Read returns a fixed Markdown draft path for existing file tools. Write commits the reviewed draft, including when unchanged, before compress or dcp_release. Keep only facts needed after removal of the selected history. Successful commits or reductions need no follow-up note entry. About 8,000 characters is guidance, not a target or hard limit. Parent and child notes are separate.",
                 input: tool.schema.object({ action: tool.schema.enum(["read", "write"]) }).strict(),
-                options: { codemode: false, permission: "compress" },
-                execute: (input, context) =>
-                    serial(context.sessionID, async () => {
-                        nativeToolSignal(context)?.throwIfAborted()
-                        const { state, entries } = await load(context.sessionID, context.agent)
-                        allowed(state)
-                        const result =
-                            input.action === "read"
-                                ? await notes.read(context.sessionID)
-                                : await notes.write(
-                                      context.sessionID,
-                                      noteReviewKey(
-                                          entries,
-                                          notes.path(context.sessionID),
-                                          ctx.location.directory,
-                                      ),
-                                  )
-                        return { content: JSON.stringify(result) }
-                    }),
+                options: { codemode: true, permission: "compress" },
+                execute: async (input, context) => {
+                    nativeToolSignal(context)?.throwIfAborted()
+                    const { state } = await load(context.sessionID, context.agent)
+                    allowed(state)
+                    // Only model-actionable facts leave the plugin: the draft path
+                    // and whether it differs from the committed note.
+                    if (input.action === "read") {
+                        const draft = await notes.read(context.sessionID)
+                        return {
+                            content: `Note draft: ${draft.path}\nDirty: ${draft.dirty ? "yes" : "no"}`,
+                        }
+                    }
+                    const committed = await notes.write(context.sessionID)
+                    return { content: `Note committed: ${committed.path}` }
+                },
             }),
         )
 
@@ -369,37 +340,28 @@ export async function setup(ctx: Plugin.Context) {
                 name: "dcp_release",
                 description: releaseDefinition.description,
                 input: tool.schema.object(releaseDefinition.args),
-                options: { codemode: false, permission: "compress" },
-                execute: (input, context) =>
-                    serial(context.sessionID, async () => {
-                        const abort = nativeToolSignal(context)
-                        abort?.throwIfAborted()
-                        const { state, entries } = await load(context.sessionID, context.agent)
-                        allowed(state)
-                        await notes.assertReviewed(
-                            context.sessionID,
-                            noteReviewKey(
-                                entries,
-                                notes.path(context.sessionID),
-                                ctx.location.directory,
-                            ),
-                        )
-                        const legacy = defineRelease(state)
-                        const content = await legacy.execute(input, {
-                            sessionID: context.sessionID,
-                            messageID: context.messageID,
-                            callID: context.id,
-                            agent: context.agent,
-                            directory: ctx.location.directory,
-                            worktree: ctx.location.directory,
-                            abort: abort ?? new AbortController().signal,
-                            ask: async () => allowed(state),
-                            metadata: ({ title }: { title?: string }) => {
-                                void context.progress({ title })
-                            },
-                        } as Parameters<typeof legacy.execute>[1])
-                        return { content: content as string }
-                    }),
+                options: { codemode: true, permission: "compress" },
+                execute: async (input, context) => {
+                    const abort = nativeToolSignal(context)
+                    abort?.throwIfAborted()
+                    const { state } = await load(context.sessionID, context.agent)
+                    allowed(state)
+                    const legacy = defineRelease(state)
+                    const content = await legacy.execute(input, {
+                        sessionID: context.sessionID,
+                        messageID: context.messageID,
+                        callID: context.id,
+                        agent: context.agent,
+                        directory: ctx.location.directory,
+                        worktree: ctx.location.directory,
+                        abort: abort ?? new AbortController().signal,
+                        ask: async () => allowed(state),
+                        metadata: ({ title }: { title?: string }) => {
+                            void context.progress({ title })
+                        },
+                    } as Parameters<typeof legacy.execute>[1])
+                    return { content: content as string }
+                },
             }),
         )
 
@@ -420,51 +382,38 @@ export async function setup(ctx: Plugin.Context) {
                 name: "compress",
                 description: definition.description,
                 input: tool.schema.object(definition.args),
-                options: { codemode: false, permission: "compress" },
-                execute: (input, context) =>
-                    serial(context.sessionID, async () => {
-                        const abort = nativeToolSignal(context)
-                        if (config.compress.model && !abort)
-                            throw new Error(
-                                "DCP model compression requires a native cancellable tool context (OpenCode 2.0.26+); original context retained",
-                            )
-                        abort?.throwIfAborted()
-                        const { state, entries } = await load(context.sessionID, context.agent)
-                        allowed(state)
-                        await notes.assertReviewed(
-                            context.sessionID,
-                            noteReviewKey(
-                                entries,
-                                notes.path(context.sessionID),
-                                ctx.location.directory,
-                            ),
-                        )
-                        const started = Date.now()
-                        const legacy = define(state)
-                        const content = await legacy.execute(input, {
-                            sessionID: context.sessionID,
-                            messageID: context.messageID,
-                            callID: context.id,
-                            agent: context.agent,
-                            directory: ctx.location.directory,
-                            worktree: ctx.location.directory,
-                            abort: abort ?? new AbortController().signal,
-                            ask: async () => allowed(state),
-                            metadata: ({ title }: { title?: string }) => {
-                                void context.progress({ title })
-                            },
-                        } as Parameters<typeof legacy.execute>[1])
-                        attachCompressionDuration(
-                            state.prune.messages,
-                            context.messageID,
-                            context.id,
-                            Date.now() - started,
-                        )
-                        await saveSessionState(state, logger)
-                        // Both shared compression executors return text; the V1 helper's
-                        // public return type also permits unrelated attachment results.
-                        return { content: content as string }
-                    }),
+                options: { codemode: true, permission: "compress" },
+                execute: async (input, context) => {
+                    const abort = nativeToolSignal(context)
+                    abort?.throwIfAborted()
+                    const { state } = await load(context.sessionID, context.agent)
+                    allowed(state)
+                    const started = Date.now()
+                    const legacy = define(state)
+                    const content = await legacy.execute(input, {
+                        sessionID: context.sessionID,
+                        messageID: context.messageID,
+                        callID: context.id,
+                        agent: context.agent,
+                        directory: ctx.location.directory,
+                        worktree: ctx.location.directory,
+                        abort: abort ?? new AbortController().signal,
+                        ask: async () => allowed(state),
+                        metadata: ({ title }: { title?: string }) => {
+                            void context.progress({ title })
+                        },
+                    } as Parameters<typeof legacy.execute>[1])
+                    attachCompressionDuration(
+                        state.prune.messages,
+                        context.messageID,
+                        context.id,
+                        Date.now() - started,
+                    )
+                    await saveSessionState(state, logger)
+                    // Both shared compression executors return text; the V1 helper's
+                    // public return type also permits unrelated attachment results.
+                    return { content: content as string }
+                },
             }),
         )
     }
@@ -475,75 +424,69 @@ export async function setup(ctx: Plugin.Context) {
                     name,
                     description: name === "dcp" ? "DCP commands" : "Trigger DCP manual compression",
                     execute: async (invocation) => {
-                        const prompt = await serial(invocation.sessionID, async () => {
-                            const { state } = await load(invocation.sessionID)
-                            const permission =
-                                state.compressPermission ?? config.compress.permission
-                            if (
-                                name === "dcp-compress" ||
-                                invocation.prompt.text.trim().split(/\s+/)[0] === "compress"
-                            )
-                                allowed(state)
-                            const output = { parts: [] }
-                            await createCommandExecuteHandler(
-                                client,
-                                state,
-                                logger,
-                                config,
-                                ctx.location.directory,
-                                { global: { compress: permission }, agents: {} },
-                            )(
-                                {
-                                    command: name,
-                                    sessionID: invocation.sessionID,
-                                    arguments: invocation.prompt.text,
-                                },
-                                output,
-                            )
-                            state.compressPermission = permission
-                            const pending = state.pendingManualTrigger
-                            if (!pending) return
+                        const { state } = await load(invocation.sessionID)
+                        const permission = state.compressPermission ?? config.compress.permission
+                        if (
+                            name === "dcp-compress" ||
+                            invocation.prompt.text.trim().split(/\s+/)[0] === "compress"
+                        )
+                            allowed(state)
+                        const output = { parts: [] }
+                        await createCommandExecuteHandler(
+                            client,
+                            state,
+                            logger,
+                            config,
+                            ctx.location.directory,
+                            { global: { compress: permission }, agents: {} },
+                        )(
+                            {
+                                command: name,
+                                sessionID: invocation.sessionID,
+                                arguments: invocation.prompt.text,
+                            },
+                            output,
+                        )
+                        state.compressPermission = permission
+                        const pending = state.pendingManualTrigger
+                        if (pending) {
                             allowed(state)
                             state.pendingManualTrigger = null
-                            return pending.prompt
-                        })
-                        if (prompt)
                             await ctx.session.prompt({
                                 sessionID: invocation.sessionID,
-                                text: prompt,
+                                text: pending.prompt,
                                 delivery: invocation.delivery,
                             })
+                        }
                     },
                 })
         })
     await ctx.rpc.register(rpc, {
         status: async () => ({ enabled: config.commands.enabled }),
-        snapshot: ({ sessionID }) =>
-            serial(sessionID, async () => {
-                const { state, messages } = await load(sessionID)
-                syncCompressionBlocks(state, logger, messages)
-                return {
-                    manualMode: !!state.manualMode,
-                    canCompress:
-                        state.compressPermission === "allow" &&
-                        (!state.isSubAgent || config.experimental.allowSubAgents),
-                    ...(state.compressPermission === "ask"
-                        ? {
-                              blockedReason:
-                                  "Permission 'ask' is not supported by the V2 plugin API yet.",
-                          }
-                        : {}),
-                    context: analyzeContextTokens(state, messages),
-                    stats: await buildStatsReport(state, logger),
-                }
-            }),
-        manual: ({ sessionID, enabled }) =>
-            serial(sessionID, async () => {
-                const { state } = await load(sessionID)
-                state.manualMode = enabled ? "active" : false
-                await saveSessionState(state, logger)
-                return {}
-            }),
+        snapshot: async ({ sessionID }) => {
+            const { state, messages } = await load(sessionID)
+            syncCompressionBlocks(state, logger, messages)
+            return {
+                manualMode: !!state.manualMode,
+                canCompress:
+                    state.compressPermission === "allow" &&
+                    (!state.isSubAgent || config.experimental.allowSubAgents),
+                ...(state.compressPermission === "ask"
+                    ? {
+                          blockedReason:
+                              "Permission 'ask' is not supported by the V2 plugin API yet.",
+                      }
+                    : {}),
+                context: analyzeContextTokens(state, messages),
+                stats: await buildStatsReport(state, logger),
+            }
+        },
+        manual: async ({ sessionID, enabled }) => {
+            const { state } = await load(sessionID)
+            state.manualMode = enabled ? "active" : false
+            await saveSessionState(state, logger)
+            return {}
+        },
     })
     logger.info("DCP V2 initialized")
     return () => {

@@ -45,8 +45,7 @@ export function appendProtectedUserMessages(
         if (message.info.role !== "user") continue
         if (isIgnoredUserMessage(message)) continue
 
-        const parts = Array.isArray(message.parts) ? message.parts : []
-        for (const part of parts) {
+        for (const part of message.parts) {
             if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
                 userTexts.push(part.text)
                 break
@@ -80,8 +79,7 @@ export function appendProtectedPromptInfo(
         if (message.info.role !== "user") continue
         if (isIgnoredUserMessage(message)) continue
 
-        const parts = Array.isArray(message.parts) ? message.parts : []
-        for (const part of parts) {
+        for (const part of message.parts) {
             if (part.type !== "text" || typeof part.text !== "string") continue
 
             protectedTexts.push(...extractProtectedPromptInfo(part.text))
@@ -129,8 +127,7 @@ export async function appendProtectedTools(
         const message = searchContext.rawMessagesById.get(messageId)
         if (!message) continue
 
-        const parts = Array.isArray(message.parts) ? message.parts : []
-        for (const part of parts) {
+        for (const part of message.parts) {
             if (part.type === "tool" && part.callID) {
                 if (
                     isToolProtected(
@@ -169,16 +166,11 @@ export async function appendProtectedTools(
                         } else {
                             const subAgentSessionId = getSubAgentId(part)
                             if (subAgentSessionId) {
-                                let subAgentResultText = ""
-                                try {
-                                    const subAgentMessages = await fetchSessionMessages(
-                                        client,
-                                        subAgentSessionId,
-                                    )
-                                    subAgentResultText = buildSubagentResultText(subAgentMessages)
-                                } catch {
-                                    subAgentResultText = ""
-                                }
+                                const subAgentMessages = await fetchSessionMessages(
+                                    client,
+                                    subAgentSessionId,
+                                )
+                                const subAgentResultText = buildSubagentResultText(subAgentMessages)
 
                                 if (subAgentResultText) {
                                     state.subAgentResultCache.set(part.callID, subAgentResultText)

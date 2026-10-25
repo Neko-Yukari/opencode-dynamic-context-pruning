@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import * as imageSize from "image-size"
@@ -57,7 +57,7 @@ export class CompressionMedia {
             throw new Error("DCP media has no retrievable reference; original context retained")
         // Text can quote documentation URLs or obsolete paths. Only carried inline
         // bytes or actual attachment parts supply images for inference.
-        this.assets.set(uri, { ref, mime, uri, bytes, referenceOnly: embedded === true && !bytes })
+        this.assets.set(uri, { ref, mime, uri, bytes, referenceOnly: embedded === true })
         return ref
     }
 
@@ -67,14 +67,8 @@ export class CompressionMedia {
                 if (asset.referenceOnly) return false
                 if (!asset.mime.startsWith("image/")) return false
                 if (!asset.bytes) return true
-                // Logs can contain test data labelled as an image. The host loads
-                // non-image bytes as text; retain their reference without attaching them.
-                try {
-                    const { width, height } = imageSize.imageSize(asset.bytes)
-                    return width > 0 && height > 0
-                } catch {
-                    return false
-                }
+                const { width, height } = imageSize.imageSize(asset.bytes)
+                return width > 0 && height > 0
             })
             .map(({ ref, mime, uri }) => ({ ref, mime, uri }))
     }
@@ -83,15 +77,7 @@ export class CompressionMedia {
         for (const { ref, bytes } of this.assets.values()) {
             if (!bytes) continue
             await mkdir(join(ref, ".."), { recursive: true, mode: 0o700 })
-            try {
-                await writeFile(ref, bytes, { flag: "wx", mode: 0o600 })
-            } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-                if (!(await readFile(ref)).equals(bytes))
-                    throw new Error(
-                        "DCP stored media differs from original; original context retained",
-                    )
-            }
+            await writeFile(ref, bytes, { mode: 0o600 })
         }
     }
 

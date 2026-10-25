@@ -55,10 +55,6 @@ export function resolveCompressionDuration(
 }
 
 export function applyPendingCompressionDurations(state: SessionState): number {
-    if (state.compressionTiming.pendingByCallId.size === 0) {
-        return 0
-    }
-
     let updates = 0
     for (const [key, entry] of state.compressionTiming.pendingByCallId) {
         const applied = attachCompressionDuration(

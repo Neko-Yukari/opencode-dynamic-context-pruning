@@ -251,9 +251,6 @@ export function createCommandExecuteHandler(
             if (subcommand === "compress") {
                 const userFocus = subArgs.join(" ").trim()
                 const prompt = await handleManualTriggerCommand(commandCtx, "compress", userFocus)
-                if (!prompt) {
-                    throw new Error("__DCP_MANUAL_TRIGGER_BLOCKED__")
-                }
 
                 state.manualMode = "compress-pending"
                 state.pendingManualTrigger = {

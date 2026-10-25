@@ -5,6 +5,7 @@ import { resolveRanges, validateNonOverlapping } from "./compress/range-utils"
 import { allocateBlockId, allocateRunId, applyCompressionState } from "./compress/state"
 import type { SessionState, WithParts } from "./state"
 import { saveSessionState } from "./state/persistence"
+import { markNoteInjection } from "./notes"
 
 const RELEASE_INSTRUCTIONS = `Release completed history so it stops entering context. Select only closed ranges or complete active blocks that are no longer needed; active work, unresolved requests and anything still needed verbatim must stay. Original messages stay on disk for explicit dcp_read inspection, never for automatic context. Recorded summaries survive until native compaction but are not readable through dcp_read. Release is one-way: there is no decompress or recompress restore.`
 
@@ -103,11 +104,12 @@ export function createReleaseTool(ctx: ToolContext): ReturnType<typeof tool> {
                 stats: { ...live.stats },
             }
             const released: number[] = []
-            let compressedMessages = 0
+            const sourceMessageIds = new Set<string>()
+            const selectedBlockIds = new Set<number>()
             for (const plan of plans) {
                 const blockId = allocateBlockId(staged)
                 const runId = allocateRunId(staged)
-                const applied = applyCompressionState(
+                applyCompressionState(
                     staged,
                     {
                         topic: input.topic,
@@ -127,34 +129,41 @@ export function createReleaseTool(ctx: ToolContext): ReturnType<typeof tool> {
                     plan.selection.requiredBlockIds,
                 )
                 const block = staged.prune.messages.blocksById.get(blockId)
-                if (!block) throw new Error("DCP release failed to stage its block")
-                block.released = true
-                block.summary = ""
-                block.summaryTokens = 0
+                block!.released = true
+                block!.summary = ""
+                block!.summaryTokens = 0
                 // A released block must never re-inject a summary on later hooks.
                 if (
-                    staged.prune.messages.activeByAnchorMessageId.get(block.anchorMessageId) ===
+                    staged.prune.messages.activeByAnchorMessageId.get(block!.anchorMessageId) ===
                     blockId
                 )
-                    staged.prune.messages.activeByAnchorMessageId.delete(block.anchorMessageId)
+                    staged.prune.messages.activeByAnchorMessageId.delete(block!.anchorMessageId)
                 released.push(blockId)
-                compressedMessages += applied.messageIds.length
+                for (const messageId of block!.effectiveMessageIds) {
+                    sourceMessageIds.add(messageId)
+                }
+                for (const consumedBlockId of block!.consumedBlockIds) {
+                    selectedBlockIds.add(consumedBlockId)
+                }
             }
 
-            await saveSessionState(staged, ctx.logger, undefined, true).catch((error: unknown) => {
-                throw new Error(
-                    `DCP release could not persist the released state; nothing was released. ${(error as Error)?.message ?? ""}`.trim(),
-                )
-            })
+            await saveSessionState(staged, ctx.logger)
             ctx.state.prune = staged.prune
             ctx.state.stats = staged.stats
+            markNoteInjection(ctx.state.sessionId)
 
             toolCtx.metadata({ title: `Released ${released.length} block(s)` })
-            return `Released ${compressedMessages} messages into ${released.map((id) => formatRef(id, ctx.state)).join(", ")}.`
+            const selectedBlocks = selectedBlockIds.size
+            const blockSummary =
+                selectedBlocks > 0
+                    ? ` (covering ${selectedBlocks} selected old block${selectedBlocks === 1 ? "" : "s"})`
+                    : ""
+            return `Released ${sourceMessageIds.size} messages${blockSummary} into ${released.map((id) => formatRef(id, ctx.state)).join(", ")}.`
         },
     })
 }
 
 function formatRef(blockId: number, state: SessionState): string {
-    return state.idFormat === "compact" ? `@b${blockId}@` : `(b${blockId})`
+    // Keep the result visible: compact @bN@ refs are consumed as mentions by the UI.
+    return state.idFormat === "compact" ? `b${blockId}` : `(b${blockId})`
 }

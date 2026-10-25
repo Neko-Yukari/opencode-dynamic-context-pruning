@@ -3,6 +3,7 @@ import { resolveAnchorMessageId, resolveBoundaryIds, resolveSelection } from "./
 import type { IdFormat } from "../message-ids"
 import type {
     BoundaryReference,
+    CompressRangeArgsInput,
     CompressRangeToolArgs,
     InjectedSummaryResult,
     ParsedBlockPlaceholder,
@@ -12,7 +13,10 @@ import type {
 
 const BLOCK_PLACEHOLDER_REGEX = /\(b(\d+)\)|\{block_(\d+)\}/gi
 
-export function validateArgs(args: CompressRangeToolArgs): void {
+export function validateSelectionArgs(args: {
+    topic?: string
+    content?: Array<{ startId?: string; endId?: string }>
+}): void {
     if (typeof args.topic !== "string" || args.topic.trim().length === 0) {
         throw new Error("topic is required and must be a non-empty string")
     }
@@ -32,6 +36,15 @@ export function validateArgs(args: CompressRangeToolArgs): void {
         if (typeof entry?.endId !== "string" || entry.endId.trim().length === 0) {
             throw new Error(`${prefix}.endId is required and must be a non-empty string`)
         }
+    }
+}
+
+export function validateArgs(args: CompressRangeToolArgs): void {
+    validateSelectionArgs(args)
+
+    for (let index = 0; index < args.content.length; index++) {
+        const entry = args.content[index]
+        const prefix = `content[${index}]`
 
         if (typeof entry?.summary !== "string" || entry.summary.trim().length === 0) {
             throw new Error(`${prefix}.summary is required and must be a non-empty string`)
@@ -40,7 +53,7 @@ export function validateArgs(args: CompressRangeToolArgs): void {
 }
 
 export function resolveRanges(
-    args: CompressRangeToolArgs,
+    args: CompressRangeArgsInput,
     searchContext: SearchContext,
     state: SessionState,
 ): ResolvedRangeCompression[] {
@@ -48,7 +61,7 @@ export function resolveRanges(
         const normalizedEntry = {
             startId: entry.startId.trim(),
             endId: entry.endId.trim(),
-            summary: entry.summary,
+            summary: entry.summary ?? "",
         }
 
         const { startReference, endReference } = resolveBoundaryIds(
@@ -81,9 +94,6 @@ export function validateNonOverlapping(plans: ResolvedRangeCompression[]): void 
     for (let index = 1; index < sortedPlans.length; index++) {
         const previous = sortedPlans[index - 1]
         const current = sortedPlans[index]
-        if (!previous || !current) {
-            continue
-        }
 
         if (current.selection.startReference.rawIndex > previous.selection.endReference.rawIndex) {
             continue
@@ -113,9 +123,6 @@ export function parseBlockPlaceholders(
         const full = match[0]
         const blockIdPart = match[1] || match[2]
         const parsed = Number.parseInt(blockIdPart, 10)
-        if (!Number.isInteger(parsed)) {
-            continue
-        }
 
         placeholders.push({
             raw: full,

@@ -63,7 +63,12 @@ function sessionFixture(configured = false) {
     } as PluginConfig
     const raw = [
         {
-            info: { id: "msg_user", role: "user", time: { created: 1 } },
+            info: {
+                id: "msg_user",
+                role: "user",
+                model: { providerID: "test", modelID: "model" },
+                time: { created: 1 },
+            },
             parts: [{ type: "text", text: "Original question" }],
         },
         {

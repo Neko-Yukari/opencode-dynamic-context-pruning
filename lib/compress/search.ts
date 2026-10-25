@@ -89,19 +89,17 @@ export function resolveBoundaryIds(
         )
     }
 
-    if (!parsedStartId || !parsedEndId) {
-        throw new Error("Invalid boundary ID(s)")
-    }
-
-    const startReference = lookup.get(parsedStartId.ref)
-    const endReference = lookup.get(parsedEndId.ref)
+    // Every issue-free boundary parses to a reference; the lookup may still not
+    // resolve it when the unit is hidden inside an active block.
+    const startReference = lookup.get(parsedStartId!.ref)
+    const endReference = lookup.get(parsedEndId!.ref)
 
     if (!startReference) {
-        issues.push(`startId ${hiddenReferenceHint(context, state, parsedStartId.ref)}`)
+        issues.push(`startId ${hiddenReferenceHint(context, state, parsedStartId!.ref)}`)
     }
 
     if (!endReference) {
-        issues.push(`endId ${hiddenReferenceHint(context, state, parsedEndId.ref)}`)
+        issues.push(`endId ${hiddenReferenceHint(context, state, parsedEndId!.ref)}`)
     }
 
     if (issues.length > 0) {
@@ -110,17 +108,13 @@ export function resolveBoundaryIds(
         )
     }
 
-    if (!startReference || !endReference) {
-        throw new Error("Failed to resolve boundary IDs")
-    }
-
-    if (startReference.rawIndex > endReference.rawIndex) {
+    if (startReference!.rawIndex > endReference!.rawIndex) {
         throw new Error(
-            `startId ${parsedStartId.ref} appears after endId ${parsedEndId.ref} in the conversation. Start must come before end.`,
+            `startId ${parsedStartId!.ref} appears after endId ${parsedEndId!.ref} in the conversation. Start must come before end.`,
         )
     }
 
-    return { startReference, endReference }
+    return { startReference: startReference!, endReference: endReference! }
 }
 
 export function resolveSelection(
@@ -163,7 +157,7 @@ export function resolveSelection(
             messageTokenById.set(messageId, countAllMessageTokens(rawMessage))
         }
 
-        const parts = Array.isArray(rawMessage.parts) ? rawMessage.parts : []
+        const parts = rawMessage.parts
         for (const part of parts) {
             if (part.type !== "tool" || !part.callID) {
                 continue
@@ -219,17 +213,9 @@ export function resolveSelection(
 }
 
 export function resolveAnchorMessageId(startReference: BoundaryReference): string {
-    if (startReference.kind === "compressed-block") {
-        if (!startReference.anchorMessageId) {
-            throw new Error("Failed to map boundary matches back to raw messages")
-        }
-        return startReference.anchorMessageId
-    }
-
-    if (!startReference.messageId) {
-        throw new Error("Failed to map boundary matches back to raw messages")
-    }
-    return startReference.messageId
+    return startReference.kind === "compressed-block"
+        ? startReference.anchorMessageId!
+        : startReference.messageId!
 }
 
 function hiddenReferenceHint(context: SearchContext, state: SessionState, ref: string): string {
@@ -306,14 +292,12 @@ function buildBoundaryLookup(
             continue
         }
         const blockRef = formatBlockRef(summary.blockId, state.idFormat)
-        if (!lookup.has(blockRef)) {
-            lookup.set(blockRef, {
-                kind: "compressed-block",
-                rawIndex,
-                blockId: summary.blockId,
-                anchorMessageId: summary.anchorMessageId,
-            })
-        }
+        lookup.set(blockRef, {
+            kind: "compressed-block",
+            rawIndex,
+            blockId: summary.blockId,
+            anchorMessageId: summary.anchorMessageId,
+        })
     }
 
     return lookup

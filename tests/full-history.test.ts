@@ -4,8 +4,7 @@ import { createSessionState, type WithParts } from "../lib/state"
 import { createReadbackTool } from "../lib/readback"
 import {
     createFullHistoryReader,
-    createVerifiedTransport,
-    type FullHistoryHostDeps,
+    createHistoryTransport,
     type FullHistoryPage,
     type FullHistoryTransport,
 } from "../lib/v2/full-history"
@@ -88,75 +87,28 @@ test("full history pages through stored rows and keeps pre-compaction originals"
     ])
 })
 
-test("verified transport rejects a different service pid before message.list", async () => {
-    let listCalls = 0
-    let makeCalls = 0
-    const ctx = {
-        session: { get: async () => session },
-        location: { directory: "C:/work" },
-    }
-    const deps: FullHistoryHostDeps = {
-        discover: async () => ({ url: "http://127.0.0.1:1234" }),
-        fetch: (async () => ({
-            ok: true,
-            status: 200,
-            json: async () => ({ pid: 222 }),
-        })) as unknown as typeof fetch,
-        headers: async () => ({}),
-        make: async () => {
-            makeCalls++
-            return {
-                message: {
-                    list: async () => {
-                        listCalls++
-                        return page([])
-                    },
-                },
-            }
-        },
-        pid: 111,
-    }
-    const reader = createFullHistoryReader(ctx, {
-        transport: createVerifiedTransport(ctx, deps),
-    })
-    await assert.rejects(reader(session.id), /different service process/)
-    assert.equal(listCalls, 0)
-    assert.equal(makeCalls, 0)
-})
-
-test("verified transport refuses an unregistered service", async () => {
-    let fetched = false
+test("history transport reports an unavailable service", async () => {
     const ctx = {
         session: { get: async () => session },
         location: { directory: "C:/work" },
     }
     const reader = createFullHistoryReader(ctx, {
-        transport: createVerifiedTransport(ctx, {
+        transport: createHistoryTransport(ctx, {
             discover: async () => undefined,
-            fetch: (async () => {
-                fetched = true
-                return { ok: true, status: 200, json: async () => ({ pid: 1 }) }
-            }) as unknown as typeof fetch,
         }),
     })
     await assert.rejects(reader(session.id), /registered local OpenCode service/)
-    assert.equal(fetched, false)
 })
 
-test("verified transport carries the current location after pid verification", async () => {
+test("history transport carries authentication and the current location", async () => {
     let received: Record<string, string> | undefined
     const ctx = {
         session: { get: async () => session },
         location: { directory: "C:/work" },
     }
     const reader = createFullHistoryReader(ctx, {
-        transport: createVerifiedTransport(ctx, {
+        transport: createHistoryTransport(ctx, {
             discover: async () => ({ url: "http://127.0.0.1:1234" }),
-            fetch: (async () => ({
-                ok: true,
-                status: 200,
-                json: async () => ({ pid: 111 }),
-            })) as unknown as typeof fetch,
             headers: async () => ({ authorization: "Basic test" }),
             make: async (options) => {
                 received = options.headers
@@ -166,7 +118,6 @@ test("verified transport carries the current location after pid verification", a
                     },
                 }
             },
-            pid: 111,
         }),
     })
     const messages = await reader(session.id)
@@ -176,29 +127,6 @@ test("verified transport carries the current location after pid verification", a
     )
     assert.equal((received as Record<string, string>)["x-opencode-location"], "C:/work")
     assert.equal((received as Record<string, string>).authorization, "Basic test")
-})
-
-test("full history rejects mismatched session metadata before reading", async () => {
-    let listCalls = 0
-    const ctx = {
-        session: { get: async () => ({ id: "other_session" }) },
-        location: { directory: "C:/work" },
-    }
-    const reader = createFullHistoryReader(ctx, {
-        transport: {
-            list: async () => {
-                listCalls++
-                return page([])
-            },
-        },
-    })
-    await assert.rejects(reader(session.id), /different or invalid session/)
-    assert.equal(listCalls, 0)
-})
-
-test("full history rejects a repeated pagination cursor", async () => {
-    const { reader } = harness([page([oldUser], "p1"), page([oldAssistant], "p1")])
-    await assert.rejects(reader(session.id), /repeated a cursor/)
 })
 
 test("an aborted full-history read does not page", async () => {
@@ -235,7 +163,13 @@ test("readback uses fullMessages and never allocates historical refs", async () 
     }
     const readback = createReadbackTool(ctx as never)
     const result = await readback.execute(
-        { startId: "msg_old_user", maxChars: 4_000 } as never,
+        {
+            startId: "msg_old_user",
+            mode: "text",
+            limit: 10,
+            caseSensitive: false,
+            maxChars: 4_000,
+        } as never,
         {
             sessionID: session.id,
             messageID: "msg_current",
@@ -247,6 +181,65 @@ test("readback uses fullMessages and never allocates historical refs", async () 
     const parsed = JSON.parse(String(result))
     assert.equal(parsed.sources[0].sourceId, "msg_old_user")
     assert.equal(state.messageIds.byRef.size, 0)
+    assert.equal(state.messageIds.nextRef, 1)
+})
+
+test("readback cursor pages reconstruct originals and search keeps its initial boundary", async () => {
+    const state = createSessionState("compact")
+    state.sessionId = session.id
+    const rows = [oldUser, oldAssistant]
+    const reader = createFullHistoryReader(
+        { session: { get: async () => session } },
+        { transport: { list: async () => page(rows) } },
+    )
+    const readback = createReadbackTool({
+        state,
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        allowSubAgents: true,
+        client: { session: { get: async () => ({ data: {} }), fullMessages: reader } },
+    } as never)
+    const context = {
+        sessionID: session.id,
+        messageID: "msg_current",
+        abort: new AbortController().signal,
+        ask: async () => {},
+        metadata: () => {},
+    }
+    const read = async (input: Record<string, unknown>) =>
+        JSON.parse(String(await readback.execute(input as never, context as never)))
+    const selection = { startId: oldUser.id, endId: oldAssistant.id }
+    const complete = await read(selection)
+    const fragments = new Map<string, string>()
+    let cursor: string | undefined
+    do {
+        const result = await read({ ...selection, maxChars: 35, cursor })
+        for (const source of result.sources) {
+            const previous = fragments.get(source.sourceId) ?? ""
+            assert.equal(source.offset, previous.length)
+            fragments.set(source.sourceId, previous + source.text)
+        }
+        cursor = result.nextCursor ?? undefined
+    } while (cursor)
+    assert.deepEqual(
+        [...fragments],
+        complete.sources.map((source: { sourceId: string; text: string }) => [
+            source.sourceId,
+            source.text,
+        ]),
+    )
+
+    const first = await read({ query: "old", limit: 1 })
+    assert.equal(first.sources[0].sourceId, oldUser.id)
+    assert.ok(first.nextCursor)
+    rows.push(user("msg_later", "old later evidence", 4))
+    const second = await read({ query: "old", limit: 1, cursor: first.nextCursor })
+    assert.equal(second.sources[0].sourceId, oldAssistant.id)
+    assert.equal(second.nextCursor, null)
+    const fresh = await read({ query: "old" })
+    assert.deepEqual(
+        fresh.sources.map((source: { sourceId: string }) => source.sourceId),
+        [oldUser.id, oldAssistant.id, "msg_later"],
+    )
     assert.equal(state.messageIds.nextRef, 1)
 })
 

@@ -73,26 +73,21 @@ type HeaderBag = Record<string, string>
 
 export interface FullHistoryHostDeps {
     readonly discover?: () => Promise<HostEndpoint | undefined>
-    readonly fetch?: typeof fetch
     readonly make?: (options: {
         readonly baseUrl: string
         readonly headers?: HeaderBag
     }) => Promise<HostClient>
     readonly headers?: (endpoint: HostEndpoint) => Promise<HeaderBag | undefined>
-    readonly pid?: number
 }
 
 const DEFAULT_PAGE_SIZE = 200
 
-function defaultHostDeps(): Required<
-    Pick<FullHistoryHostDeps, "discover" | "fetch" | "make" | "headers">
-> {
+function defaultHostDeps(): Required<FullHistoryHostDeps> {
     return {
         async discover() {
             const { Service } = await import("@opencode/client/service")
             return Service.discover() as Promise<HostEndpoint | undefined>
         },
-        fetch: globalThis.fetch,
         make: makeClient,
         headers: serviceHeaders,
     }
@@ -111,24 +106,12 @@ async function serviceHeaders(endpoint: HostEndpoint): Promise<HeaderBag | undef
     return Service.headers(endpoint)
 }
 
-function sameDirectory(left: string | undefined, right: string | undefined): boolean {
-    if (!left || !right) return true
-    const normalize = (value: string) => value.replace(/[\\/]+$/, "")
-    return normalize(left).toLowerCase() === normalize(right).toLowerCase()
-}
-
-/**
- * Verifies that the discovered local service is the host process running this
- * plugin before exposing its authenticated message.list API. Service.discover
- * alone only proves that a registered service exists; it does not prove that it
- * is this plugin's process/database.
- */
-export function createVerifiedTransport(
+/** Connects through the host's registered service and authentication. */
+export function createHistoryTransport(
     ctx: FullHistoryContext,
     deps: FullHistoryHostDeps = {},
 ): FullHistoryTransport {
     const host = { ...defaultHostDeps(), ...deps }
-    const expectedPid = deps.pid ?? process.pid
     let ready: HostClient | undefined
 
     const connect = async (signal?: AbortSignal): Promise<HostClient> => {
@@ -139,25 +122,6 @@ export function createVerifiedTransport(
                 "DCP full-history readback requires a registered local OpenCode service",
             )
         }
-        const info = await host.fetch(new URL("/api/info", endpoint.url), {
-            headers: await host.headers(endpoint),
-            signal,
-        })
-        if (!info.ok) {
-            throw new Error(
-                `DCP full-history readback could not verify the local service (status ${info.status})`,
-            )
-        }
-        const body = (await info.json()) as { readonly pid?: unknown } | null
-        if (!body || !Number.isInteger(body.pid)) {
-            throw new Error("DCP full-history readback received invalid service info")
-        }
-        if (body.pid !== expectedPid) {
-            throw new Error(
-                `DCP full-history readback refused a different service process (expected pid=${expectedPid}, got pid=${body.pid})`,
-            )
-        }
-        signal?.throwIfAborted()
         const location = ctx.location?.directory
         const headers = {
             ...((await host.headers(endpoint)) ?? {}),
@@ -187,31 +151,15 @@ export function createFullHistoryReader(
     ctx: FullHistoryContext,
     options: FullHistoryOptions = {},
 ): FullHistoryReader {
-    const source = options.transport ?? ctx.transport ?? createVerifiedTransport(ctx)
+    const source = options.transport ?? ctx.transport ?? createHistoryTransport(ctx)
     const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE
 
     return async (sessionID, signal) => {
         signal?.throwIfAborted()
-        const rawSession = await ctx.session.get({ sessionID })
+        const session = (await ctx.session.get({ sessionID })) as FullHistorySession
         signal?.throwIfAborted()
-        const session = ((rawSession as { data?: unknown })?.data ??
-            rawSession) as FullHistorySession
-        if (!session || typeof session.id !== "string" || session.id !== sessionID) {
-            throw new Error("DCP full-history readback received a different or invalid session")
-        }
-        if (
-            !sameDirectory(
-                ctx.location?.directory,
-                session.location?.directory ?? session.directory,
-            )
-        ) {
-            throw new Error(
-                "DCP full-history readback refused a session outside the current location",
-            )
-        }
 
         const entries: unknown[] = []
-        const seenCursors = new Set<string>()
         let cursor: string | undefined
         while (true) {
             signal?.throwIfAborted()
@@ -227,10 +175,6 @@ export function createFullHistoryReader(
             entries.push(...page.data)
             const next = page.cursor?.next ?? undefined
             if (!next) break
-            if (seenCursors.has(next)) {
-                throw new Error("DCP full-history pagination repeated a cursor")
-            }
-            seenCursors.add(next)
             cursor = next
         }
 
