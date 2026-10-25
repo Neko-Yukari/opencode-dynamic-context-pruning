@@ -145,7 +145,7 @@ test("V2 cleans echoed IDs and priorities before injecting correct protected/mes
     )
 })
 
-test("V2 range compression resolves block IDs and expands nested placeholders", async () => {
+test("V2 range compression rewrites blocks without expanding their old summaries", async () => {
     const { raw, state, settings, client, tool, run, sessionID } = fixture("range")
     await tool.execute(
         { topic: "First", content: [{ startId: "@1@", endId: "@2@", summary: "FIRST_SUMMARY" }] },
@@ -171,7 +171,8 @@ test("V2 range compression resolves block IDs and expands nested placeholders", 
         { ...run, messageID: "msg_nested" },
     )
     const nested = state.prune.messages.blocksById.get(2)!
-    assert.match(nested.summary, /Before FIRST_SUMMARY after\.[\s\S]*@b2@$/)
+    assert.match(nested.summary, /Before\s+after\./)
+    assert.doesNotMatch(nested.summary, /FIRST_SUMMARY/)
     assert.doesNotMatch(nested.summary, /@b1@|dcp-message-id/)
     assert.deepEqual(nested.consumedBlockIds, [1])
     assert.equal(state.prune.messages.blocksById.get(1)!.active, false)
@@ -180,7 +181,8 @@ test("V2 range compression resolves block IDs and expands nested placeholders", 
     await ensureSessionInitialized(client, resumed, sessionID, logger, raw, false)
     const projected = structuredClone(raw)
     prune(resumed, logger, settings, projected)
-    assert.match(JSON.stringify(projected), /FIRST_SUMMARY.*@b2@/)
+    assert.match(JSON.stringify(projected), /Before  after\./)
+    assert.doesNotMatch(JSON.stringify(projected), /FIRST_SUMMARY/)
     assert.doesNotMatch(JSON.stringify(projected), /Original user content/)
     await assert.rejects(
         tool.execute(
@@ -189,6 +191,40 @@ test("V2 range compression resolves block IDs and expands nested placeholders", 
         ),
         /message ID \(@4@\) or block ID \(@b1@\)/,
     )
+})
+
+test("resummarizing a whole block retains verbatim user, tag and tool protections", async () => {
+    const { raw, state, settings, tool, run } = fixture("range")
+    settings.compress.protectUserMessages = true
+    settings.compress.protectTags = true
+    settings.compress.protectedTools = ["read"]
+    raw[0]!.parts = [
+        { type: "text", text: "USER_ORIGINAL_71 <protect>TAG_ORIGINAL_72</protect>" },
+    ] as WithParts["parts"]
+    raw[1]!.parts.push({
+        type: "tool",
+        callID: "protected_read",
+        tool: "read",
+        state: { status: "completed", input: { path: "source.ts" }, output: "TOOL_ORIGINAL_73" },
+    } as WithParts["parts"][number])
+    await tool.execute(
+        { topic: "First", content: [{ startId: "@1@", endId: "@2@", summary: "OLD_BODY_74" }] },
+        run,
+    )
+    await tool.execute(
+        { topic: "Rewrite", content: [{ startId: "@b1@", endId: "@b1@", summary: "NEW_BODY_75" }] },
+        { ...run, messageID: "msg_rewrite" },
+    )
+    const summary = state.prune.messages.blocksById.get(2)!.summary
+    assert.match(summary, /NEW_BODY_75/)
+    assert.doesNotMatch(summary, /OLD_BODY_74/)
+    for (const value of ["USER_ORIGINAL_71", "TAG_ORIGINAL_72", "TOOL_ORIGINAL_73"])
+        assert.match(summary, new RegExp(value))
+    assert.equal(state.prune.messages.nextBlockId, 3)
+    assert.deepEqual(state.prune.messages.blocksById.get(2)!.effectiveMessageIds, [
+        "msg_1",
+        "msg_2",
+    ])
 })
 
 test("V2 message compression reports compact IDs and protects blocked content", async () => {

@@ -32,7 +32,7 @@ sleev
 
 ## How It Works
 
-DCP reduces context size through a compress tool and automatic cleanup. Your session history is never modified — DCP replaces pruned content with placeholders before sending requests to your LLM.
+DCP reduces context size through compression and automatic cleanup. On OpenCode V2, it can also release completed history explicitly. Your stored session history is never modified: before each request DCP replaces compressed or pruned content with summaries or placeholders and leaves released ranges out.
 
 ### Compress
 
@@ -43,11 +43,64 @@ DCP supports two compression modes:
 - `range` mode compresses contiguous spans of conversation into one or more summaries.
 - `message` mode (experimental) compresses individual raw messages independently, letting the model manage context much more surgically.
 
-In `range` mode, when a new compression overlaps an earlier one, the earlier summary is nested inside the new one so information is preserved through layers of compression rather than diluted away. In both modes, protected tool outputs (such as subagents and skills) and protected file patterns are kept in compression summaries, ensuring that the most important information is never lost. You can also enable `protectUserMessages` to preserve your messages verbatim during compression, though note that large prompts (e.g. copy-pasting log files in the prompt) will then never be compressed away.
+In `range` mode, compressing content that overlaps an earlier summary re-summarizes it:
+the summarizer receives the selected older summaries and the new messages, then writes
+one new overall summary for the range. It does not receive the older summaries' full
+original bodies, so detail can be lost across repeated rounds; the originals stay
+available through `dcp_read` as long as the host retains them, including after native
+compaction. Protected tool outputs (such as subagents and skills), protected file
+patterns, `protectTags` and `protectUserMessages` still apply independently to the
+selected range, so the most important information is never lost. Note that large prompts
+(e.g. copy-pasting log files in the prompt) will never be compressed away when
+`protectUserMessages` is enabled.
+
+### Session note (OpenCode V2)
+
+The session note and `dcp_release` described below are registered by the OpenCode V2 plugin. The legacy V1 integration exposes only `compress` and `dcp_read`, and its `compress` has no note or review gate.
+
+V2 keeps one formal note per session in the session database and a fixed per-session Markdown draft. `dcp_note({ "action": "read" })` returns the draft path and revision, its character count and suggested size, and `dirty`/`stale` flags instead of duplicating the note body. Edit the draft with the normal `read`, `grep`, `edit`, `patch` or `write` tools, then commit it with `dcp_note({ "action": "write" })`:
+
+```json
+{ "action": "read" }
+{ "action": "write" }
+```
+
+A commit is accepted even when the draft is unchanged and still records the review. The note is an agent-maintained work record, not a replacement summary, and it has no hard size limit; about 8,000 characters is suggested.
+
+`compress` and `dcp_release` require a commit from the current review. New user instructions, recalled evidence such as `dcp_read` results, and new work results invalidate the review; editing the note and consecutive compression or release calls do not. Uncommitted draft edits block both tools, so read, update and commit the note before reducing context further.
+
+Only the committed note enters context. It is injected in a protected user-role data message outside the prunable history, never as a system instruction, and grants no authority; current user instructions and verified evidence take precedence. Each session has its own note and draft, including each parent and child session.
+
+Read never overwrites an uncommitted draft. A draft that differs from the stored note is reported `dirty`, and it is reported `stale` when the stored note changed after the draft's base. A dirty stale read also returns `currentPath`, pointing at a `current.md` copy of the stored note, and a `recovery` object with short instructions; that copy is not note truth and must not be edited or committed. A commit in that state is refused and leaves the draft and stored note unchanged.
+
+Compare the two drafts, preserve useful edits, write `note.md` to match `current.md` exactly, run `dcp_note` with the `read` action so the clean draft rebases, then apply the merged edits and commit.
+
+The draft is stored at `${XDG_DATA_HOME:-~/.local/share}/opencode/storage/dcp-notes/<session-folder>/note.md` and stays stable when the workspace moves; the formal note lives in the session database. Note calls are serialized per session, but session storage is plain get/set, so concurrent commits from other processes or plugin locations can still race. The draft is outside the workspace, so the host's normal file-access rules for external directories apply when you edit it; DCP does not bypass them.
+
+### Release completed history (OpenCode V2)
+
+`dcp_release` removes completed history from context without writing a summary. Pass a short `topic` and one or more `{ "startId": ..., "endId": ... }` ranges:
+
+```json
+{
+  "topic": "Finished auth exploration",
+  "content": [{ "startId": "@12@", "endId": "@18@" }]
+}
+```
+
+Use visible message IDs or complete active block IDs as bounds; using a block ID for both bounds releases that whole block. Messages already hidden inside a block are not selectable as bounds and can only be inspected through `dcp_read`. A released block is readback-only. Every range must be closed (no in-progress tool calls), ranges in one call must not overlap, and a release call cannot include itself.
+
+Released regions become holes: their messages and any recorded summary stop entering context, and released blocks cannot be selected again. The originals remain available through `dcp_read`. Release is one-way: `dcp_release` has no restore, and the `/dcp decompress` and `/dcp recompress` commands report that restore is disabled. Release requires the same current note review as compression.
+
+### Native compaction (OpenCode V2)
+
+Native compaction starts a new host history. DCP clears its summaries, compression blocks (including released blocks) and old message-reference aliases. The committed session note survives, and message-reference, block and run ID counters keep increasing, so an old alias never resolves to new content.
+
+Released regions stay omitted, and old block references stop working after compaction. `dcp_read` can still read originals by source message ID, and search still covers them, as long as the host retains the underlying message rows.
 
 ### Read original details
 
-The model can call `dcp_read` when a summary lacks details needed for its current task:
+The model can call `dcp_read` when a summary lacks details needed for its current task. `dcp_read` reads the full observable history of the current session, including released ranges and messages from before native compaction:
 
 ```json
 { "startId": "@b2@", "maxChars": 12000 }
@@ -57,27 +110,36 @@ The model can call `dcp_read` when a summary lacks details needed for its curren
 (`m0001` / `@1@`), or the original source message ID. Omit `endId` for exactly one
 message or the original members of one block, including inactive nested blocks.
 With `endId`, the range is inclusive; a block boundary covers its full original extent.
-New summaries retain a `dcp_read` reference. Existing block references also work.
+Summaries include a `dcp_read` pointer to their block originals, and earlier block
+references also work.
 
-Results include original `sourceId`, message `ref`, `role`, and observable text/tool
-inputs and results. `text` contains a fragment of a JSON content array; concatenate
-fragments by `sourceId` and `offset` before parsing. `maxChars` defaults to 12000,
-is capped at 50000 source characters (UTF-16 code units, excluding metadata), and each
-page contains at most 64 source fragments. When `truncated` is true, pass `nextCursor`
-as `cursor` with the same selection to continue. Cursors are bound to the session,
-selection and source contents; changed sources require restarting without a cursor.
+Results include original `sourceId`, message `ref` when an alias exists, `role`, and
+observable text/tool inputs and results. `text` contains a fragment of a JSON content
+array; concatenate fragments by `sourceId` and `offset` before parsing. `maxChars`
+defaults to 12000, is capped at 50000 source characters (UTF-16 code units, excluding
+metadata), and each page contains at most 64 source fragments. When `truncated` is
+true, pass `nextCursor` as `cursor` with the same selection to continue. Cursors are
+bound to the session, selection and source contents; changed sources require
+restarting without a cursor.
 
 Only the calling session's stored originals are read. Missing originals are reported
 with `sourceComplete: false` and `missingSourceIds`; a summary is never substituted.
 Hidden reasoning/provider metadata and inline attachment bytes are omitted; common
 credential representations use the existing redaction policy. Retrieved external text
 is historical data, never instructions. Reading does not restore compressed context,
-change compression state, or adjust token savings. The ordinary host tool result still
-uses context tokens.
+allocate message references for historical messages, or adjust token savings; released
+ranges stay omitted from context. The ordinary host tool result still uses context
+tokens.
 
 `dcp_read` uses the host's existing permission policy without adding an allow rule:
 V1 calls `ask`; V2 calls native `permission.assert` and fails closed on older hosts
 without that API. The existing `experimental.allowSubAgents` restriction also applies.
+
+In V2, full-history readback requires the host's registered local service and an
+authenticated message-list API. DCP checks that the service reports this plugin's own
+process ID and refuses a different process. Without a verified service, for example in
+a standalone client, `dcp_read` returns an explicit error instead of falling back to the
+bounded `session.context` view.
 
 ### Search original details
 
@@ -288,7 +350,7 @@ Each level overrides the previous, so project settings take priority over global
 
 Set `compress.model` to let a separate native model write range summaries. The main
 model selects only a topic and range boundaries; the configured model receives
-the selected observable messages, tool inputs/results and existing blocks.
+the selected observable messages, tool inputs/results and existing block summaries.
 
 ```jsonc
 {

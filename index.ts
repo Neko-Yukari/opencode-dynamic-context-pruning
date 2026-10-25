@@ -82,7 +82,20 @@ const server: Plugin = (async (ctx) => {
         event: createEventHandler(state, logger),
         tool: {
             dcp_read: createReadbackTool({
-                client: ctx.client,
+                client: {
+                    session: {
+                        get: (input: Parameters<typeof ctx.client.session.get>[0]) =>
+                            ctx.client.session.get(input),
+                        fullMessages: async (sessionID: string, signal?: AbortSignal) => {
+                            const result = await ctx.client.session.messages({
+                                path: { id: sessionID },
+                                signal,
+                            })
+                            if (result.error) throw new Error("DCP original history unavailable")
+                            return result.data ?? []
+                        },
+                    },
+                },
                 state,
                 logger,
                 allowSubAgents: config.experimental.allowSubAgents,

@@ -3,6 +3,7 @@ import { formatBlockRef } from "../../message-ids"
 
 export function buildCompressedBlockGuidance(state: SessionState, configured = false): string {
     const refs = Array.from(state.prune.messages.activeBlockIds)
+        .filter((id) => state.prune.messages.blocksById.get(id)?.released !== true)
         .filter((id) => Number.isInteger(id) && id > 0)
         .sort((a, b) => a - b)
         .map((id) => formatBlockRef(id, state.idFormat))

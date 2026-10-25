@@ -16,34 +16,11 @@ Directly quote user messages when they are short enough to include safely. Direc
 
 Yet be LEAN. Strip away the noise: failed attempts that led nowhere, verbose tool outputs, back-and-forth exploration. What remains should be pure signal - golden nuggets of detail that preserve full understanding with zero ambiguity.
 
-COMPRESSED BLOCK PLACEHOLDERS
-When the selected range includes previously compressed blocks, use this exact placeholder format when referencing one:
-
-- \`${placeholder}\`
-
-Compressed block sections in context are clearly marked with a header:
-
-- \`[Compressed conversation section]\`
-
-${compact ? "Compressed block IDs look like `@b1@`, distinct from raw message IDs like `@4@`." : "Compressed block IDs always use the `bN` form (never `mNNNN`) and are represented in the same XML metadata tag format."}
-
-Rules:
-
-- Include every required block placeholder exactly once.
-- Do not invent placeholders for blocks outside the selected range.
-- Treat \`${placeholder}\` placeholders as RESERVED TOKENS. Do not emit \`${placeholder}\` text anywhere except intentional placeholders.
-- If you need to mention a block in prose, use plain text like \`compressed ${compact ? "block 1" : "bN"}\` (not as a placeholder).
-- Preflight check before finalizing: the set of \`${placeholder}\` placeholders in your summary must exactly match the required set, with no duplicates.
-
-These placeholders are semantic references. They will be replaced with the full stored compressed block content when the tool processes your output.
-
-FLOW PRESERVATION WITH PLACEHOLDERS
-When you use compressed block placeholders, write the surrounding summary text so it still reads correctly AFTER placeholder expansion.
-
-- Treat each placeholder as a stand-in for a full conversation segment, not as a short label.
-- Ensure transitions before and after each placeholder preserve chronology and causality.
-- Do not write text that depends on the placeholder staying literal (for example, "as noted in \`${compact ? "@b2@" : "(b2)"}\`").
-- Your final meaning must be coherent once each placeholder is replaced with its full compressed block content.
+PREVIOUSLY COMPRESSED BLOCKS
+When the selected range includes previously compressed blocks, their stored summaries are part of the source you receive. You MAY rewrite them together with the new messages into one coherent, shorter summary.
+- Preserve user intent, constraints, decisions, evidence, failures, status, uncertainty and unfinished work carried by those summaries.
+- Do not paste an old block body verbatim and do not invent block references outside the selected range.
+- Block IDs mentioned in prose are plain labels: nothing is expanded into your summary and no old body is appended after generation.
 
 BOUNDARY IDS
 You specify boundaries by ID using the injected IDs visible in the conversation:

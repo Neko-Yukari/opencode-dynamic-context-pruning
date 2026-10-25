@@ -13,6 +13,8 @@ import {
     wrapCompressedSummary,
 } from "./state"
 import type { CompressMessageToolArgs } from "./types"
+import type { SessionState } from "../state"
+import { saveSessionState } from "../state/persistence"
 
 function buildSchema(format: IdFormat) {
     return {
@@ -105,10 +107,15 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                 })
             }
 
-            const runId = allocateRunId(ctx.state)
+            const staged: SessionState = {
+                ...ctx.state,
+                prune: { ...ctx.state.prune, messages: structuredClone(ctx.state.prune.messages) },
+                stats: { ...ctx.state.stats },
+            }
+            const runId = allocateRunId(staged)
 
             for (const { plan, summaryWithTools } of preparedPlans) {
-                const blockId = allocateBlockId(ctx.state)
+                const blockId = allocateBlockId(staged)
                 const storedSummary = wrapCompressedSummary(
                     blockId,
                     summaryWithTools,
@@ -117,7 +124,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                 const summaryTokens = countTokens(storedSummary)
 
                 applyCompressionState(
-                    ctx.state,
+                    staged,
                     {
                         topic: plan.entry.topic,
                         batchTopic: input.topic,
@@ -144,7 +151,16 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                 })
             }
 
-            await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
+            await saveSessionState(staged, ctx.logger, undefined, true)
+            ctx.state.prune = staged.prune
+            ctx.state.stats = staged.stats
+            try {
+                await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
+            } catch (error) {
+                ctx.logger.error("DCP compression persisted but its notification failed", {
+                    error: (error as Error)?.message,
+                })
+            }
 
             return formatResult(plans.length, skippedIssues, skippedCount)
         },

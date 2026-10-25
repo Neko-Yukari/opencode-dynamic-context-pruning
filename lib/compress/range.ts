@@ -10,13 +10,11 @@ import {
     appendProtectedUserMessages,
 } from "./protected-content"
 import {
-    appendMissingBlockSummaries,
-    injectBlockPlaceholders,
     parseBlockPlaceholders,
     resolveRanges,
+    stripBlockPlaceholders,
     validateArgs,
     validateNonOverlapping,
-    validateSummaryPlaceholders,
 } from "./range-utils"
 import {
     COMPRESSED_BLOCK_HEADER,
@@ -27,6 +25,8 @@ import {
 } from "./state"
 import type { CompressRangeToolArgs } from "./types"
 import { generateSummary, selectedSource, redact, MODEL_SELECTION_INSTRUCTIONS } from "./model"
+import type { SessionState } from "../state"
+import { saveSessionState } from "../state/persistence"
 
 function buildSchema(format: IdFormat, configured: boolean) {
     return {
@@ -147,28 +147,13 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                             "DCP summarizer referenced an unselected block; original context retained",
                         )
                 }
-                const parsedPlaceholders = parseBlockPlaceholders(
+                const rewritten = stripBlockPlaceholders(
                     plan.entry.summary,
-                    ctx.state.idFormat,
-                )
-                const missingBlockIds = validateSummaryPlaceholders(
-                    parsedPlaceholders,
-                    plan.selection.requiredBlockIds,
-                    plan.selection.startReference,
-                    plan.selection.endReference,
-                    searchContext.summaryByBlockId,
-                )
-
-                const injected = injectBlockPlaceholders(
-                    plan.entry.summary,
-                    parsedPlaceholders,
-                    searchContext.summaryByBlockId,
-                    plan.selection.startReference,
-                    plan.selection.endReference,
+                    parseBlockPlaceholders(plan.entry.summary, ctx.state.idFormat),
                 )
 
                 const summaryWithUsers = appendProtectedUserMessages(
-                    injected.expandedSummary,
+                    rewritten,
                     plan.selection,
                     searchContext,
                     ctx.state,
@@ -194,18 +179,10 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     ctx.config.protectedFilePatterns,
                 )
 
-                const completedSummary = appendMissingBlockSummaries(
-                    summaryWithTools,
-                    missingBlockIds,
-                    searchContext.summaryByBlockId,
-                    injected.consumedBlockIds,
-                    ctx.state.idFormat,
-                )
-
-                // Protected verbatim outputs may contain the same image payload again.
+                // Selected blocks are rewritten, so no old block body is appended.
                 const finalSummary = source
-                    ? (redact(source.media.transform(completedSummary.expandedSummary)) as string)
-                    : completedSummary.expandedSummary
+                    ? (redact(source.media.transform(summaryWithTools)) as string)
+                    : summaryWithTools
                 await source?.media.save()
 
                 preparedPlans.push({
@@ -213,24 +190,34 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     selection: plan.selection,
                     anchorMessageId: plan.anchorMessageId,
                     finalSummary,
-                    consumedBlockIds: completedSummary.consumedBlockIds,
+                    consumedBlockIds: [...plan.selection.requiredBlockIds],
                 })
             }
 
             if (configured) toolCtx.abort.throwIfAborted()
-            const runId = allocateRunId(ctx.state)
+            // Stage the whole batch, persist it strictly, then publish. A failed write
+            // must not leave a half-applied live state or report success.
+            const staged: SessionState = {
+                ...ctx.state,
+                prune: {
+                    ...ctx.state.prune,
+                    messages: structuredClone(ctx.state.prune.messages),
+                },
+                stats: { ...ctx.state.stats },
+            }
+            const runId = allocateRunId(staged)
 
             for (const preparedPlan of preparedPlans) {
-                const blockId = allocateBlockId(ctx.state)
+                const blockId = allocateBlockId(staged)
                 const storedSummary = wrapCompressedSummary(
                     blockId,
                     preparedPlan.finalSummary,
-                    ctx.state.idFormat,
+                    staged.idFormat,
                 )
                 const summaryTokens = countTokens(storedSummary)
 
                 const applied = applyCompressionState(
-                    ctx.state,
+                    staged,
                     {
                         topic: input.topic,
                         batchTopic: input.topic,
@@ -259,7 +246,25 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                 })
             }
 
-            await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
+            try {
+                await saveSessionState(staged, ctx.logger, undefined, true)
+            } catch (error) {
+                throw new Error(
+                    `DCP compression could not persist its state; original context retained. ${(error as Error)?.message ?? ""}`.trim(),
+                )
+            }
+            ctx.state.prune = staged.prune
+            ctx.state.stats = staged.stats
+
+            // State is already persisted: a notification failure must not be
+            // reported as "original context retained".
+            try {
+                await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
+            } catch (error) {
+                ctx.logger.error("DCP compression persisted but its notification failed", {
+                    error: (error as Error)?.message,
+                })
+            }
 
             return `Compressed ${totalCompressedMessages} messages into ${COMPRESSED_BLOCK_HEADER}.`
         },

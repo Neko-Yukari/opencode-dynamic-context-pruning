@@ -8,6 +8,7 @@ import type {
 import { isIgnoredUserMessage, messageHasCompress } from "../messages/query"
 import { isMessageWithInfo } from "../messages/shape"
 import { countTokens } from "../token-utils"
+import type { IdFormat } from "../message-ids"
 
 export const isMessageCompacted = (state: SessionState, msg: WithParts): boolean => {
     if (!isMessageWithInfo(msg)) {
@@ -102,6 +103,64 @@ export function loadPruneMap(obj?: Record<string, number>): Map<string, number> 
             typeof entry[0] === "string" && typeof entry[1] === "number",
     )
     return new Map(entries)
+}
+
+export interface PersistedMessageIdState {
+    byRawId?: Record<string, string>
+    byRef?: Record<string, string>
+    nextRef?: number
+    format?: IdFormat
+}
+
+export function serializeMessageIdState(state: SessionState): PersistedMessageIdState {
+    return {
+        byRawId: Object.fromEntries(state.messageIds.byRawId),
+        byRef: Object.fromEntries(state.messageIds.byRef),
+        nextRef: state.messageIds.nextRef,
+        format: state.idFormat,
+    }
+}
+
+// Restore aliases without allocating new ones or lowering the high-water mark, so
+// a service restart never renumbers refs the model has already seen.
+export function loadMessageIdState(state: SessionState, persisted?: PersistedMessageIdState): void {
+    if (!persisted || typeof persisted !== "object") {
+        return
+    }
+
+    if (persisted.byRawId && typeof persisted.byRawId === "object") {
+        for (const [rawId, ref] of Object.entries(persisted.byRawId)) {
+            if (!rawId || typeof ref !== "string" || ref.length === 0) {
+                continue
+            }
+            state.messageIds.byRawId.set(rawId, ref)
+            if (!state.messageIds.byRef.has(ref)) {
+                state.messageIds.byRef.set(ref, rawId)
+            }
+        }
+    }
+
+    if (persisted.byRef && typeof persisted.byRef === "object") {
+        for (const [ref, rawId] of Object.entries(persisted.byRef)) {
+            if (!ref || typeof rawId !== "string" || rawId.length === 0) {
+                continue
+            }
+            if (!state.messageIds.byRef.has(ref)) {
+                state.messageIds.byRef.set(ref, rawId)
+            }
+            if (!state.messageIds.byRawId.has(rawId)) {
+                state.messageIds.byRawId.set(rawId, ref)
+            }
+        }
+    }
+
+    if (
+        typeof persisted.nextRef === "number" &&
+        Number.isInteger(persisted.nextRef) &&
+        persisted.nextRef > state.messageIds.nextRef
+    ) {
+        state.messageIds.nextRef = persisted.nextRef
+    }
 }
 
 export function createPruneMessagesState(): PruneMessagesState {
@@ -243,6 +302,7 @@ export function loadPruneMessagesState(
                         ? block.deactivatedByBlockId
                         : undefined,
                 summary: typeof block.summary === "string" ? block.summary : "",
+                released: block.released === true ? true : undefined,
             })
         }
     }
@@ -273,7 +333,8 @@ export function loadPruneMessagesState(
     for (const [blockId, block] of state.blocksById) {
         if (block.active) {
             state.activeBlockIds.add(blockId)
-            if (block.anchorMessageId) {
+            // Released blocks own their covered messages but must not inject a summary.
+            if (block.anchorMessageId && block.released !== true) {
                 state.activeByAnchorMessageId.set(block.anchorMessageId, blockId)
             }
         }
@@ -320,7 +381,7 @@ export function getActiveSummaryTokenUsage(state: SessionState): number {
     let total = 0
     for (const blockId of state.prune.messages.activeBlockIds) {
         const block = state.prune.messages.blocksById.get(blockId)
-        if (!block || !block.active) {
+        if (!block || !block.active || block.released === true) {
             continue
         }
         total += block.summaryTokens
@@ -329,13 +390,20 @@ export function getActiveSummaryTokenUsage(state: SessionState): number {
 }
 
 export function resetOnCompaction(state: SessionState): void {
+    // Native compaction starts a fresh history, but aliases and block ids must keep
+    // climbing: an old ref may never resolve to new content. Note state lives
+    // outside this object and survives on purpose.
+    const nextBlockId = state.prune.messages.nextBlockId
+    const nextRunId = state.prune.messages.nextRunId
     state.toolParameters.clear()
     state.prune.tools = new Map<string, number>()
     state.prune.messages = createPruneMessagesState()
+    state.prune.messages.nextBlockId = nextBlockId
+    state.prune.messages.nextRunId = nextRunId
     state.messageIds = {
         byRawId: new Map<string, string>(),
         byRef: new Map<string, string>(),
-        nextRef: 1,
+        nextRef: state.messageIds.nextRef,
     }
     state.nudges = {
         contextLimitAnchors: new Set<string>(),

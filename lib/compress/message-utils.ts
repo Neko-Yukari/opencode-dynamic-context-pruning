@@ -226,6 +226,11 @@ function resolveMessage(
         throw new SoftIssue("not-in-context", parsed.ref, "not in context")
     }
 
+    const pruneEntry = state.prune.messages.byMessageId.get(messageId)
+    if (pruneEntry && pruneEntry.activeBlockIds.length > 0) {
+        throw new SoftIssue("already-compressed", parsed.ref, "already compressed")
+    }
+
     const { startReference, endReference } = resolveBoundaryIds(
         searchContext,
         state,
@@ -236,11 +241,6 @@ function resolveMessage(
 
     if (isProtectedUserMessage(config, rawMessage)) {
         throw new SoftIssue("protected", parsed.ref, "protected message")
-    }
-
-    const pruneEntry = state.prune.messages.byMessageId.get(messageId)
-    if (pruneEntry && pruneEntry.activeBlockIds.length > 0) {
-        throw new SoftIssue("already-compressed", parsed.ref, "already compressed")
     }
 
     return {

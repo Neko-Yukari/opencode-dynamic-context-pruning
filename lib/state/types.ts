@@ -59,6 +59,9 @@ export interface CompressionBlock {
     deactivatedAt?: number
     deactivatedByBlockId?: number
     summary: string
+    // Released blocks stay active as owners that suppress their covered messages
+    // but no longer inject a summary or count toward summary token usage.
+    released?: boolean
 }
 
 export interface PruneMessagesState {

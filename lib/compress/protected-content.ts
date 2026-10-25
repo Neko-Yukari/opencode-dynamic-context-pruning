@@ -9,6 +9,25 @@ import {
 import { fetchSessionMessages } from "./search"
 import type { SearchContext, SelectionResolution } from "./types"
 
+function protectedSourceIds(
+    selection: SelectionResolution,
+    searchContext: SearchContext,
+): string[] {
+    const ids = new Set(selection.messageIds)
+    for (const blockId of selection.requiredBlockIds) {
+        const block = searchContext.summaryByBlockId.get(blockId)
+        if (!block) throw new Error(`DCP protected block source unavailable: ${blockId}`)
+        for (const id of block.effectiveMessageIds) {
+            if (!searchContext.rawMessagesById.has(id))
+                throw new Error(
+                    `DCP protected original unavailable: ${id}; original context retained`,
+                )
+            ids.add(id)
+        }
+    }
+    return [...ids]
+}
+
 export function appendProtectedUserMessages(
     summary: string,
     selection: SelectionResolution,
@@ -20,12 +39,7 @@ export function appendProtectedUserMessages(
 
     const userTexts: string[] = []
 
-    for (const messageId of selection.messageIds) {
-        const existingCompressionEntry = state.prune.messages.byMessageId.get(messageId)
-        if (existingCompressionEntry && existingCompressionEntry.activeBlockIds.length > 0) {
-            continue
-        }
-
+    for (const messageId of protectedSourceIds(selection, searchContext)) {
         const message = searchContext.rawMessagesById.get(messageId)
         if (!message) continue
         if (message.info.role !== "user") continue
@@ -60,12 +74,7 @@ export function appendProtectedPromptInfo(
 
     const protectedTexts: string[] = []
 
-    for (const messageId of selection.messageIds) {
-        const existingCompressionEntry = state.prune.messages.byMessageId.get(messageId)
-        if (existingCompressionEntry && existingCompressionEntry.activeBlockIds.length > 0) {
-            continue
-        }
-
+    for (const messageId of protectedSourceIds(selection, searchContext)) {
         const message = searchContext.rawMessagesById.get(messageId)
         if (!message) continue
         if (message.info.role !== "user") continue
@@ -113,14 +122,10 @@ export async function appendProtectedTools(
     protectedTools: string[],
     protectedFilePatterns: string[] = [],
 ): Promise<string> {
+    if (protectedTools.length === 0 && protectedFilePatterns.length === 0) return summary
     const protectedOutputs: string[] = []
 
-    for (const messageId of selection.messageIds) {
-        const existingCompressionEntry = state.prune.messages.byMessageId.get(messageId)
-        if (existingCompressionEntry && existingCompressionEntry.activeBlockIds.length > 0) {
-            continue
-        }
-
+    for (const messageId of protectedSourceIds(selection, searchContext)) {
         const message = searchContext.rawMessagesById.get(messageId)
         if (!message) continue
 

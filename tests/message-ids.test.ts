@@ -4,86 +4,44 @@ import { Logger } from "../lib/logger"
 import { assignMessageRefs } from "../lib/message-ids"
 import { checkSession, createSessionState, type WithParts } from "../lib/state"
 
-function textPart(messageID: string, sessionID: string, id: string, text: string) {
-    return {
-        id,
-        messageID,
-        sessionID,
-        type: "text" as const,
-        text,
-    }
-}
-
-function buildCompactedMessages(sessionID: string): WithParts[] {
-    return [
+test("native compaction clears aliases while preserving their high-water counter", async () => {
+    const sessionID = `ses_message_ids_after_compaction_${Date.now()}`
+    const messages = [
         {
             info: {
-                id: "msg-assistant-summary",
+                id: "msg_summary",
                 role: "assistant",
                 sessionID,
-                agent: "assistant",
                 summary: true,
                 time: { created: 2 },
-            } as WithParts["info"],
-            parts: [
-                textPart(
-                    "msg-assistant-summary",
-                    sessionID,
-                    "msg-assistant-summary-part",
-                    "Compaction summary",
-                ),
-            ],
+            },
+            parts: [],
         },
         {
             info: {
-                id: "msg-user-follow-up",
+                id: "msg_followup",
                 role: "user",
                 sessionID,
-                agent: "assistant",
-                model: {
-                    providerID: "anthropic",
-                    modelID: "claude-test",
-                },
                 time: { created: 3 },
-            } as WithParts["info"],
-            parts: [
-                textPart(
-                    "msg-user-follow-up",
-                    sessionID,
-                    "msg-user-follow-up-part",
-                    "Continue after compaction",
-                ),
-            ],
+            },
+            parts: [{ type: "text", id: "part_followup", text: "Continue" }],
         },
-    ]
-}
-
-test("checkSession resets message id aliases after native compaction", async () => {
-    const sessionID = `ses_message_ids_after_compaction_${Date.now()}`
-    const messages = buildCompactedMessages(sessionID)
-    const state = createSessionState()
-    const logger = new Logger(false)
-
+    ] as WithParts[]
+    const state = createSessionState("compact")
     state.sessionId = sessionID
-    state.messageIds.byRawId.set("old-message-9998", "m9998")
-    state.messageIds.byRawId.set("old-message-9999", "m9999")
-    state.messageIds.byRef.set("m9998", "old-message-9998")
-    state.messageIds.byRef.set("m9999", "old-message-9999")
-    state.messageIds.nextRef = 9999
+    state.messageIds.byRawId.set("msg_old", "@9999@")
+    state.messageIds.byRef.set("@9999@", "msg_old")
+    state.messageIds.nextRef = 10000
 
-    await checkSession({} as any, state, logger, messages, false)
+    await checkSession({}, state, new Logger(false), messages, false)
 
     assert.equal(state.lastCompaction, 2)
     assert.equal(state.messageIds.byRawId.size, 0)
     assert.equal(state.messageIds.byRef.size, 0)
-    assert.equal(state.messageIds.nextRef, 1)
-
-    const assigned = assignMessageRefs(state, messages)
-
-    assert.equal(assigned, 2)
-    assert.equal(state.messageIds.byRawId.get("msg-assistant-summary"), "m0001")
-    assert.equal(state.messageIds.byRawId.get("msg-user-follow-up"), "m0002")
-    assert.equal(state.messageIds.byRef.get("m0001"), "msg-assistant-summary")
-    assert.equal(state.messageIds.byRef.get("m0002"), "msg-user-follow-up")
-    assert.equal(state.messageIds.nextRef, 3)
+    assert.equal(state.messageIds.nextRef, 10000)
+    assert.equal(assignMessageRefs(state, messages), 2)
+    assert.equal(state.messageIds.byRawId.get("msg_summary"), "@10000@")
+    assert.equal(state.messageIds.byRawId.get("msg_followup"), "@10001@")
+    assert.equal(state.messageIds.byRef.has("@9999@"), false)
+    assert.equal(state.messageIds.nextRef, 10002)
 })

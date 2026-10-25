@@ -185,6 +185,7 @@ const filterCompressedRanges = (
             const rawSummaryContent = (summary as { summary?: unknown }).summary
             if (
                 summary.active !== true ||
+                summary.released === true ||
                 typeof rawSummaryContent !== "string" ||
                 rawSummaryContent.length === 0
             ) {

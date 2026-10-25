@@ -80,6 +80,9 @@ export interface SearchContext {
     rawMessagesById: Map<string, WithParts>
     rawIndexById: Map<string, number>
     summaryByBlockId: Map<number, CompressionBlock>
+    // Messages owned by an active block (released or not) are not visible units.
+    blockedMessageIdToBlockId?: Map<string, number>
+    releasedMessageIds?: Set<string>
 }
 
 export interface SelectionResolution {

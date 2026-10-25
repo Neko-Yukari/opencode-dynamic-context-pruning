@@ -34,6 +34,9 @@ Do not compress active or unresolved work, messages still waiting on a user answ
 If no safely closed range exists, continue useful work without forcing compression, and do not repeat compress attempts on the same range.
 For context reduction, a prose recap in chat does not replace the compress tool or free context space. User-requested summaries are unaffected.
 
+SELECTION FOLLOW-UP
+If a completed block is no longer needed at all, dcp_release removes it from context one-way. Inspect it first with or dcp_read: release cannot be undone.
+
 ON FAILURE
 If compression fails, the original context is retained. Report the diagnostic; do not substitute a summary of your own.
 </dcp-system-reminder>

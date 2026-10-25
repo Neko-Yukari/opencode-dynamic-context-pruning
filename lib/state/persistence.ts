@@ -10,7 +10,9 @@ import { homedir } from "os"
 import { join } from "path"
 import type { CompressionBlock, PrunedMessageEntry, SessionState, SessionStats } from "./types"
 import type { Logger } from "../logger"
-import { serializePruneMessagesState } from "./utils"
+import { serializePruneMessagesState, serializeMessageIdState } from "./utils"
+import type { PersistedMessageIdState } from "./utils"
+export type { PersistedMessageIdState } from "./utils"
 
 /** Prune state as stored on disk */
 export interface PersistedPruneMessagesState {
@@ -40,6 +42,9 @@ export interface PersistedSessionState {
     nudges: PersistedNudges
     stats: SessionStats
     lastUpdated: string
+    // Optional so older files keep loading.
+    messageIds?: PersistedMessageIdState
+    lastCompaction?: number
 }
 
 const STORAGE_DIR = join(
@@ -69,7 +74,13 @@ async function writePersistedSessionState(
 
     const filePath = getSessionFilePath(sessionId)
     const content = JSON.stringify(state, null, 2)
-    await fs.writeFile(filePath, content, "utf-8")
+    const temporary = `${filePath}.${process.pid}.tmp`
+    try {
+        await fs.writeFile(temporary, content, "utf-8")
+        await fs.rename(temporary, filePath)
+    } finally {
+        await fs.rm(temporary, { force: true })
+    }
 
     logger.info("Saved session state to disk", {
         sessionId,
@@ -81,9 +92,15 @@ export async function saveSessionState(
     sessionState: SessionState,
     logger: Logger,
     sessionName?: string,
+    // Default callers keep the historical best-effort behavior. Callers that must
+    // not report success on a failed write opt in and handle the rejection.
+    strict = false,
 ): Promise<void> {
     try {
         if (!sessionState.sessionId) {
+            if (strict) {
+                throw new Error("DCP cannot persist state without a session id")
+            }
             return
         }
 
@@ -100,6 +117,8 @@ export async function saveSessionState(
                 iterationNudgeAnchors: Array.from(sessionState.nudges.iterationNudgeAnchors),
             },
             stats: sessionState.stats,
+            messageIds: serializeMessageIdState(sessionState),
+            lastCompaction: sessionState.lastCompaction,
             lastUpdated: new Date().toISOString(),
         }
 
@@ -109,6 +128,9 @@ export async function saveSessionState(
             sessionId: sessionState.sessionId,
             error: error?.message,
         })
+        if (strict) {
+            throw error
+        }
     }
 }
 

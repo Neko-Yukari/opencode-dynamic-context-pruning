@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto"
 import { tool } from "@opencode-ai/plugin"
 import type { Logger } from "./logger"
-import { assignMessageRefs, formatMessageRef, parseBoundaryId } from "./message-ids"
+import { formatMessageRef, parseBoundaryId } from "./message-ids"
 import { isIgnoredUserMessage } from "./messages/query"
 import { createSessionState, loadSessionState, type SessionState, type WithParts } from "./state"
 import { loadPruneMessagesState } from "./state/utils"
-import { fetchSessionMessages } from "./compress/search"
+import type { FullHistoryReader } from "./v2/full-history"
 import { redact } from "./compress/model"
 import { searchWithSgrep } from "./readback-sgrep"
 import { READBACK_INSTRUCTIONS } from "./prompts/readback"
@@ -331,14 +331,14 @@ export function readOriginalPage(
             sources,
             truncated,
             nextCursor: truncated
-                ? Buffer.from(JSON.stringify({
+                ? Buffer.from(
+                      JSON.stringify({
                           v: 2,
                           hash: fingerprint,
                           index,
                           endSourceId: records.at(-1)!.sourceId,
-                      })).toString(
-                      "base64url",
-                  )
+                      }),
+                  ).toString("base64url")
                 : null,
         }
     }
@@ -443,7 +443,7 @@ export async function searchOriginalSemantic(
 
 export function createReadbackTool(ctx: ReadbackContext): ReturnType<typeof tool> {
     return tool({
-        description: `Read or search original observable conversation content from the CURRENT session by compressed block or message IDs, including nested blocks. Read-only: no decompression, state writes, or savings accounting. Missing originals are reported. Paginated JSON, at most 64 source fragments per page. ${READBACK_INSTRUCTIONS}`,
+        description: `Read or search original observable conversation content from the CURRENT session by compressed block or message IDs, including nested and released blocks. Includes durable history before completed compaction. Read-only: no decompression, state writes, or savings accounting. Missing originals are reported. Paginated JSON, at most 64 source fragments per page. ${READBACK_INSTRUCTIONS}`,
         args: argsSchema,
         async execute(input, toolCtx) {
             const args = inputSchema.parse(input)
@@ -458,7 +458,14 @@ export function createReadbackTool(ctx: ReadbackContext): ReturnType<typeof tool
             const info = session?.data ?? session
             if (!ctx.allowSubAgents && info?.parentID)
                 throw new Error("DCP readback is disabled in subagents")
-            const messages = (await fetchSessionMessages(ctx.client, toolCtx.sessionID)).filter(
+            const fullMessages = (ctx.client.session as { fullMessages?: FullHistoryReader })
+                .fullMessages
+            if (typeof fullMessages !== "function") {
+                throw new Error(
+                    "DCP full-history readback requires the V2 fullMessages backend; bounded session.context is not a fallback",
+                )
+            }
+            const messages = (await fullMessages(toolCtx.sessionID, toolCtx.abort)).filter(
                 (message) => message.info.sessionID === toolCtx.sessionID,
             )
             // Ephemeral view: no prepareSession, strategies, sync, or persistence writes.
@@ -475,8 +482,28 @@ export function createReadbackTool(ctx: ReadbackContext): ReturnType<typeof tool
             } else {
                 const saved = await loadSessionState(toolCtx.sessionID, ctx.logger)
                 state.prune.messages = loadPruneMessagesState(saved?.prune.messages)
+                // Optional state-worker fields: reuse persisted aliases rather
+                // than allocating refs for historical messages here. Unmapped
+                // messages still have their stable sourceId locator.
+                const persisted = saved as {
+                    messageIds?: {
+                        byRawId?: Record<string, string>
+                        byRef?: Record<string, string>
+                        nextRef?: number
+                    }
+                    lastCompaction?: number
+                } | null
+                if (persisted?.messageIds) {
+                    state.messageIds = {
+                        byRawId: new Map(Object.entries(persisted.messageIds.byRawId ?? {})),
+                        byRef: new Map(Object.entries(persisted.messageIds.byRef ?? {})),
+                        nextRef: persisted.messageIds.nextRef ?? 1,
+                    }
+                }
+                if (typeof persisted?.lastCompaction === "number") {
+                    state.lastCompaction = persisted.lastCompaction
+                }
             }
-            assignMessageRefs(state, messages)
             toolCtx.abort.throwIfAborted()
             const page =
                 args.mode === "semantic"

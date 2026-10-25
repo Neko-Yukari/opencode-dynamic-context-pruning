@@ -85,7 +85,7 @@ export const syncCompressionBlocks = (
         block.deactivatedAt = undefined
         block.deactivatedByBlockId = undefined
         messagesState.activeBlockIds.add(block.blockId)
-        if (messageIds.has(block.anchorMessageId)) {
+        if (block.released !== true && messageIds.has(block.anchorMessageId)) {
             messagesState.activeByAnchorMessageId.set(block.anchorMessageId, block.blockId)
         }
     }

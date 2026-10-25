@@ -36,6 +36,10 @@ import { MODEL_SELECTION_INSTRUCTIONS } from "../compress/model"
 import { nativeToolSignal } from "./cancellation"
 import { createSummarizer } from "./summarizer"
 import { createReadbackTool } from "../readback"
+import { createNotes } from "../notes"
+import { createReleaseTool } from "../release"
+import { createFullHistoryReader } from "./full-history"
+import { injectSessionNote, NOTE_INSTRUCTIONS, noteReviewKey } from "./note-context"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
@@ -60,6 +64,8 @@ export async function setup(ctx: Plugin.Context) {
         return
     }
     const logger = new Logger(config.debug)
+    const notes = createNotes(ctx.storage, ctx.location.directory)
+    const fullHistory = createFullHistoryReader(ctx)
     const prompts = new PromptStore(
         logger,
         ctx.location.directory,
@@ -104,6 +110,7 @@ export async function setup(ctx: Plugin.Context) {
 
     const client = {
         session: {
+            fullMessages: fullHistory,
             get: async ({ path }: { path: { id: string } }) => ({
                 data: await ctx.session.get({ sessionID: path.id }),
             }),
@@ -179,7 +186,10 @@ export async function setup(ctx: Plugin.Context) {
     await ctx.model.transform((editor) => {
         limits.clear()
         for (const model of editor.list())
-            limits.set(`${model.providerID}/${model.id}`, { context: model.limit.context, output: model.limit.output })
+            limits.set(`${model.providerID}/${model.id}`, {
+                context: model.limit.context,
+                output: model.limit.output,
+            })
     })
     for (const kind of ["context", "compaction"] as const)
         await ctx.session.hook(kind, (event) =>
@@ -191,9 +201,15 @@ export async function setup(ctx: Plugin.Context) {
                 if (state.isSubAgent && !config.experimental.allowSubAgents) {
                     delete event.tools.compress
                     delete event.tools.dcp_read
+                    delete event.tools.dcp_release
+                    delete event.tools.dcp_note
                     return
                 }
-                if (state.compressPermission === "deny") delete event.tools.compress
+                if (state.compressPermission === "deny") {
+                    delete event.tools.compress
+                    delete event.tools.dcp_release
+                    delete event.tools.dcp_note
+                }
                 const limit = limits.get(`${event.model.providerID}/${event.model.id}`)
                 state.modelContextLimit = limit?.context
                 state.modelOutputLimit = limit?.output
@@ -206,7 +222,8 @@ export async function setup(ctx: Plugin.Context) {
                     model: event.model,
                 })
                 stripHallucinations(view.messages, state.idFormat)
-                assignMessageRefs(state, view.messages)
+                const assignedRefs = assignMessageRefs(state, view.messages)
+                if (assignedRefs > 0) await saveSessionState(state, logger, undefined, true)
                 // Compaction may select only a prefix; block origins can be in the retained tail.
                 syncCompressionBlocks(state, logger, messages)
                 syncToolCache(state, config, logger, view.messages)
@@ -233,6 +250,12 @@ export async function setup(ctx: Plugin.Context) {
                 injectMessageIds(state, config, view.messages, priorities)
                 applyPendingManualTrigger(state, view.messages, logger)
                 event.messages = view.restore()
+                const note = await notes.get(event.sessionID)
+                event.messages = injectSessionNote(
+                    event.messages,
+                    event.sessionID,
+                    note?.content ?? "",
+                )
                 const system = { system: event.system.map((part) => part.text) }
                 await createSystemPromptHandler(
                     state,
@@ -251,6 +274,8 @@ export async function setup(ctx: Plugin.Context) {
                     type: "text",
                     text,
                 }))
+                if (state.compressPermission !== "deny")
+                    event.system.push({ type: "text", text: NOTE_INSTRUCTIONS })
                 await logger.saveContext(event.sessionID, view.messages)
             }),
         )
@@ -308,6 +333,76 @@ export async function setup(ctx: Plugin.Context) {
     )
 
     if (config.compress.permission !== "deny") {
+        await ctx.tool.transform((editor) =>
+            editor.add({
+                name: "dcp_note",
+                description:
+                    "Read the current session's note workspace or commit its edited Markdown draft. Read returns a fixed file path for the existing read, grep, edit and patch tools. Write commits that draft to the session database and confirms review, including when unchanged. Commit before compress or dcp_release; uncommitted edits are not protected. Suggested size: about 8,000 characters, no hard limit. Parent and child sessions have separate notes.",
+                input: tool.schema.object({ action: tool.schema.enum(["read", "write"]) }).strict(),
+                options: { codemode: false, permission: "compress" },
+                execute: (input, context) =>
+                    serial(context.sessionID, async () => {
+                        nativeToolSignal(context)?.throwIfAborted()
+                        const { state, entries } = await load(context.sessionID, context.agent)
+                        allowed(state)
+                        const result =
+                            input.action === "read"
+                                ? await notes.read(context.sessionID)
+                                : await notes.write(
+                                      context.sessionID,
+                                      noteReviewKey(
+                                          entries,
+                                          notes.path(context.sessionID),
+                                          ctx.location.directory,
+                                      ),
+                                  )
+                        return { content: JSON.stringify(result) }
+                    }),
+            }),
+        )
+
+        const defineRelease = (state: SessionState) =>
+            createReleaseTool({ client, state, logger, config, prompts })
+        const releaseDefinition = defineRelease(createSessionState("compact"))
+        await ctx.tool.transform((editor) =>
+            editor.add({
+                name: "dcp_release",
+                description: releaseDefinition.description,
+                input: tool.schema.object(releaseDefinition.args),
+                options: { codemode: false, permission: "compress" },
+                execute: (input, context) =>
+                    serial(context.sessionID, async () => {
+                        const abort = nativeToolSignal(context)
+                        abort?.throwIfAborted()
+                        const { state, entries } = await load(context.sessionID, context.agent)
+                        allowed(state)
+                        await notes.assertReviewed(
+                            context.sessionID,
+                            noteReviewKey(
+                                entries,
+                                notes.path(context.sessionID),
+                                ctx.location.directory,
+                            ),
+                        )
+                        const legacy = defineRelease(state)
+                        const content = await legacy.execute(input, {
+                            sessionID: context.sessionID,
+                            messageID: context.messageID,
+                            callID: context.id,
+                            agent: context.agent,
+                            directory: ctx.location.directory,
+                            worktree: ctx.location.directory,
+                            abort: abort ?? new AbortController().signal,
+                            ask: async () => allowed(state),
+                            metadata: ({ title }: { title?: string }) => {
+                                void context.progress({ title })
+                            },
+                        } as Parameters<typeof legacy.execute>[1])
+                        return { content: content as string }
+                    }),
+            }),
+        )
+
         const define = (state: SessionState): ToolDefinition =>
             (config.compress.mode === "message" && config.compress.model === undefined
                 ? createCompressMessageTool
@@ -334,8 +429,16 @@ export async function setup(ctx: Plugin.Context) {
                                 "DCP model compression requires a native cancellable tool context (OpenCode 2.0.26+); original context retained",
                             )
                         abort?.throwIfAborted()
-                        const { state } = await load(context.sessionID, context.agent)
+                        const { state, entries } = await load(context.sessionID, context.agent)
                         allowed(state)
+                        await notes.assertReviewed(
+                            context.sessionID,
+                            noteReviewKey(
+                                entries,
+                                notes.path(context.sessionID),
+                                ctx.location.directory,
+                            ),
+                        )
                         const started = Date.now()
                         const legacy = define(state)
                         const content = await legacy.execute(input, {

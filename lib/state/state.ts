@@ -10,6 +10,7 @@ import {
     createPruneMessagesState,
     loadPruneMessagesState,
     loadPruneMap,
+    loadMessageIdState,
     collectTurnNudgeAnchors,
 } from "./utils"
 import { getLastUserMessage } from "../messages/query"
@@ -47,17 +48,21 @@ export const checkSession = async (
 
     const lastCompactionTimestamp = findLastCompactionTimestamp(messages)
     if (lastCompactionTimestamp > state.lastCompaction) {
+        const previousCompaction = state.lastCompaction
         state.lastCompaction = lastCompactionTimestamp
         resetOnCompaction(state)
         logger.info("Detected compaction - reset stale state", {
             timestamp: lastCompactionTimestamp,
         })
 
-        saveSessionState(state, logger).catch((error) => {
-            logger.warn("Failed to persist state reset after compaction", {
-                error: error instanceof Error ? error.message : String(error),
-            })
-        })
+        try {
+            await saveSessionState(state, logger, undefined, true)
+        } catch (error) {
+            // Keep the old marker so the next turn retries the reset instead of
+            // continuing with unpersisted state.
+            state.lastCompaction = previousCompaction
+            throw error
+        }
     }
 
     state.currentTurn = countTurns(state, messages)
@@ -177,14 +182,35 @@ export async function ensureSessionInitialized(
 
     state.prune.tools = loadPruneMap(persisted.prune.tools)
     state.prune.messages = loadPruneMessagesState(persisted.prune.messages)
-    state.nudges.contextLimitAnchors = new Set<string>(persisted.nudges.contextLimitAnchors || [])
-    state.nudges.turnNudgeAnchors = new Set<string>([
-        ...state.nudges.turnNudgeAnchors,
-        ...(persisted.nudges.turnNudgeAnchors || []),
-    ])
-    state.nudges.iterationNudgeAnchors = new Set<string>(
-        persisted.nudges.iterationNudgeAnchors || [],
+    loadMessageIdState(state, persisted.messageIds)
+    const persistedCompaction =
+        typeof persisted.lastCompaction === "number" ? persisted.lastCompaction : undefined
+    const newestBlockCreatedAt = Math.max(
+        0,
+        ...Array.from(state.prune.messages.blocksById.values(), (block) => block.createdAt),
     )
+    // Older files have no lastCompaction: compare the completed compaction against
+    // the newest saved block so a cold restart cannot resurrect pre-compact history.
+    const stale =
+        state.lastCompaction > 0 &&
+        (persistedCompaction !== undefined
+            ? persistedCompaction < state.lastCompaction
+            : newestBlockCreatedAt < state.lastCompaction)
+    if (stale) {
+        resetOnCompaction(state)
+    }
+    if (!stale) {
+        state.nudges.contextLimitAnchors = new Set<string>(
+            persisted.nudges.contextLimitAnchors || [],
+        )
+        state.nudges.turnNudgeAnchors = new Set<string>([
+            ...state.nudges.turnNudgeAnchors,
+            ...(persisted.nudges.turnNudgeAnchors || []),
+        ])
+        state.nudges.iterationNudgeAnchors = new Set<string>(
+            persisted.nudges.iterationNudgeAnchors || [],
+        )
+    }
     state.stats = {
         pruneTokenCounter: persisted.stats?.pruneTokenCounter || 0,
         totalPruneTokens: persisted.stats?.totalPruneTokens || 0,

@@ -1,5 +1,5 @@
-import type { SessionState, WithParts } from "../state"
-import { formatBlockRef, parseBoundaryId } from "../message-ids"
+import type { SessionState, WithParts, CompressionBlock } from "../state"
+import { formatBlockRef, parseBlockRef, parseBoundaryId } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
 import { filterMessages } from "../messages/shape"
 import { countAllMessageTokens } from "../token-utils"
@@ -27,9 +27,22 @@ export function buildSearchContext(state: SessionState, rawMessages: WithParts[]
         rawIndexById.set(message.info.id, index)
     }
 
-    const summaryByBlockId = new Map()
+    const summaryByBlockId = new Map<number, CompressionBlock>()
+    const blockedMessageIdToBlockId = new Map<string, number>()
+    const releasedMessageIds = new Set<string>()
     for (const [blockId, block] of state.prune.messages.blocksById) {
         if (!block.active) {
+            continue
+        }
+        // Any active owner hides its covered sources. Released owners keep hiding
+        // them but expose neither a summary nor a selectable boundary.
+        for (const messageId of block.effectiveMessageIds) {
+            blockedMessageIdToBlockId.set(messageId, blockId)
+            if (block.released === true) {
+                releasedMessageIds.add(messageId)
+            }
+        }
+        if (block.released === true) {
             continue
         }
         summaryByBlockId.set(blockId, block)
@@ -40,6 +53,8 @@ export function buildSearchContext(state: SessionState, rawMessages: WithParts[]
         rawMessagesById,
         rawIndexById,
         summaryByBlockId,
+        blockedMessageIdToBlockId,
+        releasedMessageIds,
     }
 }
 
@@ -82,15 +97,11 @@ export function resolveBoundaryIds(
     const endReference = lookup.get(parsedEndId.ref)
 
     if (!startReference) {
-        issues.push(
-            `startId ${parsedStartId.ref} is not available in the current conversation context. Choose an injected ID visible in context.`,
-        )
+        issues.push(`startId ${hiddenReferenceHint(context, state, parsedStartId.ref)}`)
     }
 
     if (!endReference) {
-        issues.push(
-            `endId ${parsedEndId.ref} is not available in the current conversation context. Choose an injected ID visible in context.`,
-        )
+        issues.push(`endId ${hiddenReferenceHint(context, state, parsedEndId.ref)}`)
     }
 
     if (issues.length > 0) {
@@ -137,6 +148,12 @@ export function resolveSelection(
         }
 
         const messageId = rawMessage.info.id
+        // Only visible units are selectable. Sources already owned by an active
+        // block (including a released one) are holes: their membership travels
+        // through the block, never as a resurrected raw message.
+        if (context.blockedMessageIdToBlockId?.has(messageId)) {
+            continue
+        }
         if (!messageSeen.has(messageId)) {
             messageSeen.add(messageId)
             messageIds.push(messageId)
@@ -159,18 +176,17 @@ export function resolveSelection(
         }
     }
 
-    const selectedMessageIds = new Set(messageIds)
     const summariesInSelection: Array<{ blockId: number; rawIndex: number }> = []
     for (const summary of context.summaryByBlockId.values()) {
-        if (!selectedMessageIds.has(summary.anchorMessageId)) {
-            continue
-        }
-
         const anchorIndex = context.rawIndexById.get(summary.anchorMessageId)
         if (anchorIndex === undefined) {
             continue
         }
-
+        // A visible block participates when its anchor falls inside the range,
+        // whether the caller used the block ref or a message around it.
+        if (anchorIndex < startRawIndex || anchorIndex > endRawIndex) {
+            continue
+        }
         summariesInSelection.push({
             blockId: summary.blockId,
             rawIndex: anchorIndex,
@@ -186,7 +202,7 @@ export function resolveSelection(
         requiredBlockIds.push(summary.blockId)
     }
 
-    if (messageIds.length === 0) {
+    if (messageIds.length === 0 && requiredBlockIds.length === 0) {
         throw new Error(
             "Failed to map boundary matches back to raw messages. Choose boundaries that include original conversation messages.",
         )
@@ -216,6 +232,33 @@ export function resolveAnchorMessageId(startReference: BoundaryReference): strin
     return startReference.messageId
 }
 
+function hiddenReferenceHint(context: SearchContext, state: SessionState, ref: string): string {
+    const rawId = state.messageIds.byRef.get(ref)
+    if (rawId !== undefined) {
+        const owner = context.blockedMessageIdToBlockId?.get(rawId)
+        if (owner !== undefined) {
+            const ownerRef = formatBlockRef(owner, state.idFormat)
+            return context.releasedMessageIds?.has(rawId)
+                ? `is released inside ${ownerRef}; released history is readback-only.`
+                : `is hidden inside ${ownerRef}; select ${ownerRef} instead.`
+        }
+    }
+
+    const blockId = parseBlockRef(ref, state.idFormat)
+    if (blockId !== null) {
+        const block = state.prune.messages.blocksById.get(blockId)
+        if (block?.released === true) {
+            return "was released; released history is readback-only."
+        }
+        const parent = block && !block.active ? block.parentBlockIds.at(-1) : undefined
+        if (parent !== undefined) {
+            return `is inside ${formatBlockRef(parent, state.idFormat)}; select that block instead.`
+        }
+    }
+
+    return "is not available in the current conversation context. Choose a visible closed unit."
+}
+
 function buildBoundaryLookup(
     context: SearchContext,
     state: SessionState,
@@ -228,6 +271,10 @@ function buildBoundaryLookup(
             continue
         }
         if (isIgnoredUserMessage(rawMessage)) {
+            continue
+        }
+        // A message already owned by an active block is not a visible unit.
+        if (context.blockedMessageIdToBlockId?.has(messageId)) {
             continue
         }
 
