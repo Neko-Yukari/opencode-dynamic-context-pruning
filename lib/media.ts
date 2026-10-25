@@ -65,8 +65,18 @@ export function mapMedia(value: unknown, reference: (source: MediaSource) => str
             if (mapped !== undefined) return mapped
         }
         return mapEmbeddedJson(value, reference).replace(
-            /data:([\w.+-]+\/[\w.+-]+)(?:;[\w.+-]+=[^;,\s]+)*;base64,[A-Za-z0-9+/]+={0,2}/gi,
-            (uri, mime: string) => reference({ uri, mime: mime.toLowerCase() }),
+            /data:([\w.+-]+\/[\w.+-]+)(?:;[\w.+-]+=[^;,\s]+)*;base64,([A-Za-z0-9+/]+={0,2})/gi,
+            (uri, mime: string, data: string) => {
+                // Prose and source code can contain illustrative data URLs. Only
+                // canonical payloads are media; invalid text stays verbatim.
+                const bytes = Buffer.from(data, "base64")
+                if (
+                    !bytes.length ||
+                    bytes.toString("base64").replace(/=+$/, "") !== data.replace(/=+$/, "")
+                )
+                    return uri
+                return reference({ uri, mime: mime.toLowerCase() })
+            },
         )
     }
     if (Array.isArray(value)) return value.map((item) => mapMedia(item, reference))

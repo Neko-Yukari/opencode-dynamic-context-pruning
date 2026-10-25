@@ -61,6 +61,26 @@ test("summary generation uses the accrued budget for the production source estim
     assert.equal(requestedBudget, summaryBudget(sourceEstimate))
 })
 
+test("inline image examples in source text are preserved when their base64 is not valid", () => {
+    const media = new CompressionMedia()
+    for (const text of [
+        'const fixtureURI = "data:image/png;base64,fixture"',
+        "Image syntax: data:image/png;base64,AAAAA (not an attachment)",
+    ]) {
+        assert.equal(media.transform(text), text)
+    }
+    assert.deepEqual(media.images(), [])
+    assert.throws(
+        () =>
+            media.transform({
+                type: "file",
+                uri: "data:image/png;base64,fixture",
+                mime: "image/png",
+            }),
+        /invalid media encoding/,
+    )
+})
+
 test("image sources pass an internal budget instead of a full output reserve", async () => {
     const bytes = Buffer.alloc(33)
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0)
