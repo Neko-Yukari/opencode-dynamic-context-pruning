@@ -2,9 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import * as imageSize from "image-size"
 import { mapMedia, type MediaSource } from "../media"
-import type { SummaryImage } from "./types"
 
 const extensions: Record<string, string> = {
     "image/png": "png",
@@ -17,18 +15,15 @@ const extensions: Record<string, string> = {
 }
 
 export class CompressionMedia {
-    private assets = new Map<string, SummaryImage & { bytes?: Buffer; referenceOnly: boolean }>()
+    private assets = new Map<string, MediaSource & { ref: string; bytes?: Buffer }>()
 
     transform(value: unknown): unknown {
         return mapMedia(value, (source) => this.reference(source))
     }
 
-    private reference({ uri, mime, embedded }: MediaSource): string {
+    private reference({ uri, mime }: MediaSource): string {
         const previous = this.assets.get(uri)
-        if (previous) {
-            if (!embedded) previous.referenceOnly = false
-            return previous.ref
-        }
+        if (previous) return previous.ref
         let ref = uri
         let bytes: Buffer | undefined
         if (/^data:/i.test(uri)) {
@@ -55,22 +50,8 @@ export class CompressionMedia {
         }
         if (!ref)
             throw new Error("DCP media has no retrievable reference; original context retained")
-        // Text can quote documentation URLs or obsolete paths. Only carried inline
-        // bytes or actual attachment parts supply images for inference.
-        this.assets.set(uri, { ref, mime, uri, bytes, referenceOnly: embedded === true })
+        this.assets.set(uri, { ref, mime, uri, bytes })
         return ref
-    }
-
-    images(): SummaryImage[] {
-        return [...new Map([...this.assets.values()].map((asset) => [asset.ref, asset])).values()]
-            .filter((asset) => {
-                if (asset.referenceOnly) return false
-                if (!asset.mime.startsWith("image/")) return false
-                if (!asset.bytes) return true
-                const { width, height } = imageSize.imageSize(asset.bytes)
-                return width > 0 && height > 0
-            })
-            .map(({ ref, mime, uri }) => ({ ref, mime, uri }))
     }
 
     async save(): Promise<void> {
@@ -81,18 +62,14 @@ export class CompressionMedia {
         }
     }
 
-    appendReferences(summary: string, inspected: boolean): string {
+    appendReferences(summary: string): string {
         if (!this.assets.size) return summary
         const refs = [
             ...new Map([...this.assets.values()].map((asset) => [asset.ref, asset])).values(),
         ]
         return (
             summary +
-            "\n\nMedia references retained (" +
-            (inspected
-                ? "images supplied to summarizer; other attachments reference-only"
-                : "reference-only; visual contents were not inspected by the summarizer") +
-            "):\n" +
+            "\n\nAttachment references retained (reference-only; contents were not inspected by the summarizer):\n" +
             refs.map(({ ref, mime }) => `- ${mime}: ${JSON.stringify(ref)}`).join("\n")
         )
     }

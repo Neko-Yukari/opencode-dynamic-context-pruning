@@ -367,19 +367,15 @@ the selected observable messages, tool inputs/results and existing block summari
 and output limits. This mode requires OpenCode 2.0.30 or later; leaving `model`
 unset preserves the existing main-authored summaries. Message mode is not supported.
 
-If the selected model advertises image input, selected images are supplied in an
-isolated, tool-free native session. Other models receive references only. Inline
+All attachments, including images and PDFs, are reference-only for the compression
+model, even when it supports image input. Their payloads are never resent through
+a temporary session. The summary preserves facts already present in the selected
+text and explicitly states that attachment contents were not inspected. Inline
 attachments are saved under
 `${XDG_DATA_HOME:-~/.local/share}/opencode/storage/plugin/dcp/media` using
 content-derived filenames. Summaries retain those paths or original URLs; Base64
 payloads are excluded from summary text and text-token estimates. Keep these files
 alongside session data when moving sessions between machines.
-
-Original image bytes enter only the transient inference request. The isolated
-session stores a fixed tiny placeholder, avoiding large session/SSE events. Image
-collections above OpenCode 2.1's 25 MiB inline request limit are rejected before
-admission so the host cannot silently omit selected images. Select a smaller closed
-range when that limit is reached; original images and context are retained.
 
 Missing model or variant references, provider errors, cancellation and invalid
 summaries leave the original context intact. No input is silently truncated.
@@ -391,16 +387,15 @@ switch.
 
 Summary length is advisory: 20% of the first 20,000 estimated source tokens, 15%
 of the next 80,000 and 10% beyond that. The text recommendation is between 2,000
-and 32,000 tokens; each supplied image adds 512. Summaries below five times that
+and 32,000 tokens. Summaries below five times that
 recommendation are accepted. At or above five times, DCP rejects the reply and
 makes one correction request to the same model using the same selected sources
-and images. A second reply at or above that threshold fails and retains the
+and attachment references. A second reply at or above that threshold fails and retains the
 original context.
 
-Before requesting a summary, DCP checks the estimated prompt, attached images
-and recommended reply against the summarizer model's actual context window.
-There is no fixed percentage margin. For images, an existing host `maxTokens`
-is capped by the estimated remaining window; an absent field stays absent.
+Before requesting a summary, DCP checks the estimated text prompt and recommended
+reply against the summarizer model's actual context window. There is no fixed
+percentage margin. Attachment payloads are never part of this request.
 
 Before saving a compression batch, DCP renders the proposed context through its
 normal pruning path and estimates the retained history, new summaries and

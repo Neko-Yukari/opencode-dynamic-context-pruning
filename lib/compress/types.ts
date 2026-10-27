@@ -3,21 +3,6 @@ import type { Logger } from "../logger"
 import type { PromptStore } from "../prompts/store"
 import type { CompressionBlock, CompressionMode, SessionState, WithParts } from "../state"
 
-export interface SummaryImage {
-    ref: string
-    mime: string
-    uri: string
-}
-
-// Real model window budget for one summarizer request. The adapter adds decoded
-// image tokens; the text path uses the same formula with no images.
-export interface SummaryRequestCapacity {
-    promptTokens: number
-    contextWindow: number
-    outputLimit: number
-    recommendation: number
-}
-
 export interface ToolContext {
     client: any
     state: SessionState
@@ -29,8 +14,6 @@ export interface ToolContext {
             input: {
                 prompt: string
                 model: { providerID: string; id: string; variant?: string }
-                images?: SummaryImage[]
-                capacity?: SummaryRequestCapacity
             },
             signal: AbortSignal,
         ): Promise<{ text: string }>

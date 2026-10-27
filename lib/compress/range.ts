@@ -142,8 +142,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     )
                 }
                 if (source) {
-                    summaryReplyTokens +=
-                        5 * summaryBudget(estimate(source.text), source.media.images().length)
+                    summaryReplyTokens += 5 * summaryBudget(estimate(source.text))
                 }
                 const rewritten = stripBlockPlaceholders(
                     plan.entry.summary,
