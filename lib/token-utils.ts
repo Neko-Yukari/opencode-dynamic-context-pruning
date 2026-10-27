@@ -2,10 +2,16 @@ import { SessionState, WithParts } from "./state"
 import { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Logger } from "./logger"
 import * as _anthropicTokenizer from "@anthropic-ai/tokenizer"
-const anthropicCountTokens = (_anthropicTokenizer.countTokens ??
-    (_anthropicTokenizer as any).default?.countTokens) as typeof _anthropicTokenizer.countTokens
 import { getLastUserMessage } from "./messages/query"
 import { mediaTokenText } from "./media"
+
+const anthropicGetTokenizer = (_anthropicTokenizer.getTokenizer ??
+    (_anthropicTokenizer as any).default?.getTokenizer) as typeof _anthropicTokenizer.getTokenizer
+
+// Building a Tiktoken costs ~50ms (fresh wasm instance plus the full BPE rank
+// table), and the old per-call construction dominated every cold context hook.
+// One shared instance keeps the same encode semantics without that cost.
+let sharedTokenizer: ReturnType<typeof _anthropicTokenizer.getTokenizer> | undefined
 
 export function getCurrentTokenUsage(state: SessionState, messages: WithParts[]): number {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -69,7 +75,8 @@ export function getCurrentParams(
 
 export function countTokens(text: string): number {
     text = mediaTokenText(text)
-    return anthropicCountTokens(text)
+    sharedTokenizer ??= anthropicGetTokenizer()
+    return sharedTokenizer.encode(text.normalize("NFKC"), "all").length
 }
 
 export function estimateTokensBatch(texts: string[]): number {
