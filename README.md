@@ -228,15 +228,15 @@ Each level overrides the previous, so project settings take priority over global
         "summaryBuffer": true,
         // Soft upper threshold: above this, DCP keeps injecting strong
         // compression nudges (based on nudgeFrequency), so compression is
-        // much more likely. Accepts: number or "X%" of model context window.
-        "maxContextLimit": 100000,
+        // much more likely. Accepts: number, "X%", or { tokens, percent };
+        "maxContextLimit": { "tokens": 500000, "percent": "60%" },
         // Soft lower threshold for reminder nudges: below this, turn/iteration
         // reminders are off (compression less likely). At/above this, reminders
-        // are on. Accepts: number or "X%" of model context window.
-        "minContextLimit": 50000,
+        // are on. Accepts: number, "X%", or { tokens, percent } (smaller wins).
+        "minContextLimit": { "tokens": 200000, "percent": "30%" },
         // Optional per-model override for maxContextLimit by providerID/modelID.
         // If present, this wins over the global maxContextLimit.
-        // Accepts: number or "X%".
+        // Accepts: number, "X%", or { tokens, percent } (smaller wins).
         // Example:
         // "modelMaxLimits": {
         //     "provider/model": "80%"
@@ -374,3 +374,6 @@ and testing with the V1/V2 sandbox.
 ## License
 
 AGPL-3.0-or-later
+
+
+

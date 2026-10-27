@@ -22,6 +22,9 @@ export interface Deduplication {
     protectedTools: string[]
 }
 
+/** Absolute tokens, a percent of the model window, or both (the smaller wins). */
+export type ContextLimit = number | `${number}%` | { tokens?: number; percent?: number | `${number}%` }
+
 export interface CompressConfig {
     model?: string
     fallbackModels?: string[]
@@ -30,10 +33,10 @@ export interface CompressConfig {
     permission: Permission
     showCompression: boolean
     summaryBuffer: boolean
-    maxContextLimit: number | `${number}%`
-    minContextLimit: number | `${number}%`
-    modelMaxLimits?: Record<string, number | `${number}%`>
-    modelMinLimits?: Record<string, number | `${number}%`>
+    maxContextLimit: ContextLimit
+    minContextLimit: ContextLimit
+    modelMaxLimits?: Record<string, ContextLimit>
+    modelMinLimits?: Record<string, ContextLimit>
     nudgeFrequency: number
     iterationNudgeThreshold: number
     nudgeForce: "strong" | "soft"
@@ -519,11 +522,13 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
             ): void => {
                 const isValidNumber = typeof value === "number"
                 const isPercentString = typeof value === "string" && value.endsWith("%")
+                const isObjectLimit = typeof value === "object" && value !== null && !Array.isArray(value)
+                    && ((typeof (value as any).tokens === "number") || (typeof (value as any).percent === "number") || (typeof (value as any).percent === "string" && String((value as any).percent).endsWith("%")))
 
-                if (!isValidNumber && !isPercentString) {
+                if (!isValidNumber && !isPercentString && !isObjectLimit) {
                     errors.push({
                         key,
-                        expected: 'number | "${number}%"',
+                        expected: 'number | "${number}%" | { tokens?, percent? }',
                         actual: JSON.stringify(actualValue),
                     })
                 }
@@ -548,12 +553,13 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
 
                 for (const [providerModelKey, limit] of Object.entries(limits)) {
                     const isValidNumber = typeof limit === "number"
-                    const isPercentString =
-                        typeof limit === "string" && /^\d+(?:\.\d+)?%$/.test(limit)
-                    if (!isValidNumber && !isPercentString) {
+                    const isObjectLimit = typeof limit === "object" && limit !== null && !Array.isArray(limit)
+                        && ((typeof (limit as any).tokens === "number") || (typeof (limit as any).percent === "number") || (typeof (limit as any).percent === "string" && /^\d+(?:\.\d+)?%$/.test(String((limit as any).percent))))
+                    const isPercentString = typeof limit === "string" && /^\d+(?:\.\d+)?%$/.test(limit)
+                    if (!isValidNumber && !isPercentString && !isObjectLimit) {
                         errors.push({
                             key: `${key}.${providerModelKey}`,
-                            expected: 'number | "${number}%"',
+                            expected: 'number | "${number}%" | { tokens?, percent? }',
                             actual: JSON.stringify(limit),
                         })
                     }
@@ -739,8 +745,8 @@ const defaultConfig: PluginConfig = {
         permission: "allow",
         showCompression: false,
         summaryBuffer: true,
-        maxContextLimit: 100000,
-        minContextLimit: 50000,
+        maxContextLimit: { tokens: 550000, percent: "55%" },
+        minContextLimit: { tokens: 250000, percent: "25%" },
         nudgeFrequency: 5,
         iterationNudgeThreshold: 15,
         nudgeForce: "soft",
@@ -1066,3 +1072,6 @@ export function getConfig(ctx: ConfigContext): PluginConfig {
 
     return config
 }
+
+
+
