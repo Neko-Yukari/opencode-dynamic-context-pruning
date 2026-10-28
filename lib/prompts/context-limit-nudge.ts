@@ -1,43 +1,21 @@
-export const CONTEXT_LIMIT_NUDGE = `<dcp-system-reminder>
-CRITICAL WARNING: MAX CONTEXT LIMIT REACHED
-
-You are at or beyond the configured max context threshold. This is an emergency context-recovery moment.
-
-You MUST use the \`compress\` tool now. Do not continue normal exploration until compression is handled.
-
-If you are in the middle of a critical atomic operation, finish that atomic step first, then compress immediately.
-
-SELECTION PROCESS
-Start from older, resolved history and capture as much stale context as safely possible in one pass.
-Avoid the newest active working messages unless it is clearly closed.
-
-SUMMARY REQUIREMENTS
-Your summary MUST cover all essential details from the selected messages so work can continue.
-If the compressed range includes user messages, preserve user intent exactly. Prefer direct quotes for short user messages to avoid semantic drift.
+export const CONTEXT_LIMIT_NUDGE = `
+<dcp-system-reminder>
+MAX CONTEXT LIMIT REACHED. Compress the largest closed, completed ranges now.
+You MUST use the \`compress\` tool now. Your summary MUST cover every file path, decision, constraint and key finding needed to continue. Keep the current goal, active constraints and open decisions.
+If a safely closed range exists, you MUST use the compress tool now; a prose recap in chat does not replace the compress tool. If no safely closed range exists, continue useful work.
+When several independent ranges are ready, batch their non-overlapping boundaries in one compress call. Do not compress active work, unresolved requests or the current compression call.
+If the selected range includes compressed blocks, include each required placeholder exactly once in the summary.
+Use dcp_release only after durable facts are stored in a summary, session note or memory; released originals remain readable through dcp_read but not in automatic context.
 </dcp-system-reminder>
 `
 
 export const MODEL_SELECTION_CONTEXT_LIMIT_NUDGE = `
 <dcp-system-reminder>
-CONTEXT LIMIT REACHED — COMPRESS AT A SAFE BOUNDARY
-
-You are at or beyond the configured max context threshold. Finish the current atomic step first. At that safe boundary, if a safely closed range exists, you MUST call the compress tool before continuing normal exploration or implementation.
-
-COMPRESS TOOL CONTRACT
-Call \`compress\` with only \`topic\` and \`content: [{ startId, endId }]\` using observed message or block IDs.
-The configured summarizer model writes the summary. Do not write or pass a summary yourself.
-
-SELECTION PROCESS
-Start from older, resolved history that is truly complete and has no remaining raw-fidelity dependency.
-A completed subtask can be compressed while the broader task continues; do not wait for the entire task to finish.
-Do not compress active or unresolved work, messages still waiting on a user answer, raw output needed for exact verification, or this compress call.
-If no safely closed range exists, continue useful work without forcing compression, and do not repeat compress attempts on the same range.
-For context reduction, a prose recap in chat does not replace the compress tool or free context space. User-requested summaries are unaffected.
-
-SELECTION FOLLOW-UP
-
-
-ON FAILURE
-If compression fails, the original context is retained. Report the diagnostic; do not substitute a summary of your own.
+COMPRESS AT A SAFE BOUNDARY
+Context is above the configured limit. Select the largest closed, completed ranges for compress now.
+Pass one topic and multiple non-overlapping startId, endId entries in one call; the configured summarizer writes the summaries. Do not write or pass a summary yourself; do not substitute a summary of your own. Preserved by the configured summarizer.
+Finish the current atomic step first; before continuing normal exploration or implementation, if a safely closed range exists, you MUST call the compress tool before continuing. If no safely closed range exists, continue useful work; do not wait for the entire task to finish.
+A completed subtask can be compressed while the broader task continues; a prose recap in chat does not replace the compress tool. User-requested summaries are unaffected. Keep active work, recent tool results and unresolved evidence verbatim.
+Use dcp_release only after durable facts are stored in a summary, session note or memory; released originals remain readable through dcp_read but not in automatic context.
 </dcp-system-reminder>
 `

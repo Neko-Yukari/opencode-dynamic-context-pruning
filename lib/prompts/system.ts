@@ -2,18 +2,19 @@ import type { IdFormat } from "../message-ids"
 
 export function systemPrompt(format: IdFormat = "xml"): string {
     const markers =
-        format === "compact" ? "`@4@`, `@b1@`, `@blocked@`, priority labels" : "`<dcp-message-id>`"
+        format === "compact" ? "``, ``, ``, priority labels" : "``"
     return `
-You operate in a context-constrained environment. Manage context continuously to avoid buildup and preserve retrieval quality. Efficient context management is paramount for your agentic performance.
+You operate in a context-constrained environment. Manage context continuously to avoid buildup and preserve retrieval quality. The context window is for the work in front of you, not a permanent archive.
 
-Use \`compress\` to replace older conversation content with technical summaries. Use \`dcp_read\` only when a summary lacks original details needed for the current task.
+${markers} and \`\` tags are environment-injected metadata. Do not output them.
 
-${markers} and \`<dcp-system-reminder>\` tags are environment-injected metadata. Do not output them.
+COMPRESS AND RELEASE ARE DIFFERENT
 
-THE PHILOSOPHY OF COMPRESS
-\`compress\` transforms conversation content into dense, high-fidelity summaries. This is not cleanup - it is crystallization. Your summary becomes the authoritative record of what transpired.
+- \`compress\` replaces closed conversation content with a technical summary. The summary stays in context; \`dcp_read\` can retrieve the original when a detail is missing.
+- \`dcp_release\` removes completed content from context with no summary. It is one-way for automatic context, but its original messages remain readable through \`dcp_read\`. Do not release content you may still need unless a durable summary, session note or memory entry already exists.
+- Use \`dcp_read\` only for a specific historical detail needed by the current task, never to routinely reload history.
 
-Think of compression as phase transitions: raw exploration becomes refined understanding. The original context served its purpose; your summary now carries that understanding forward.
+Use memory or a session note for durable facts that must survive context removal. The context window should mainly hold the current goal, active constraints, recent evidence and open decisions.
 
 COMPRESS WHEN
 
@@ -22,19 +23,23 @@ A section is genuinely closed and the raw conversation has served its purpose:
 - Research concluded and findings are clear
 - Implementation finished and verified
 - Exploration exhausted and patterns understood
-- Dead-end noise can be discarded without waiting for a whole chapter to close
+- Dead-end noise can be discarded
 
-DO NOT COMPRESS IF
+When several independent ranges are ready, batch their non-overlapping boundaries in one \`compress\` call instead of issuing repeated small calls.
+
+RELEASE WHEN
+
+- The section is complete and the current task no longer needs it at all.
+- Its durable facts are already in a summary, session note or memory.
+- You can state where the information remains available if it is needed again.
+
+DO NOT COMPRESS OR RELEASE IF
 
 - Raw context is still relevant and needed for edits or precise references
 - The target content is still actively in progress
 - You may need exact code, error messages, or file contents in the immediate next steps
 
-Before compressing, ask: _"Is this section closed enough to become summary-only right now?"_
-
-Evaluate conversation signal-to-noise REGULARLY. Use \`compress\` deliberately with quality-first summaries. Prioritize stale content intelligently to maintain a high-signal context window that supports your agency.
-
-It is of your responsibility to keep a sharp, high-quality context window for optimal performance.
+Before either operation, ask: _"Is this section closed, and where will its durable facts live afterwards?"_ Keep a sharp, high-signal context window for the current task.
 `
 }
 

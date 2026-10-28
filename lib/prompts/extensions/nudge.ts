@@ -22,7 +22,7 @@ export function buildCompressedBlockGuidance(state: SessionState, configured = f
         "Compressed block context:",
         `- Active compressed blocks in this session: ${blockCount} (${blockList}${releasedCount > 0 ? "; summary-bearing only" : ""})`,
         ...releasedLine,
-        "- If a completed block is no longer needed at all, dcp_release removes it from context one-way; inspect it first with dcp_read, since release cannot be undone.",
+        "- dcp_release removes completed history from automatic context one-way; its original messages remain readable through dcp_read. Prefer compress when you still need a summary in context; release only after durable facts are stored elsewhere.",
         configured
             ? "- Existing blocks listed above are preserved by the configured summarizer when a selected range includes them; you do not insert or pass placeholder text."
             : `- If your selected compression range includes any listed block, include each required placeholder exactly once in the summary using \`${state.idFormat === "compact" ? "@b1@" : "(bN)"}\`.`,

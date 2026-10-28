@@ -1,6 +1,3 @@
-export const ITERATION_NUDGE = `<dcp-system-reminder>
-You've been iterating for a while after the last user message.
-
-If there is a closed portion that is unlikely to be referenced immediately (for example, finished research before implementation), use the compress tool on it now.
-</dcp-system-reminder>
+export const ITERATION_NUDGE = `
+You have been working for many iterations. Compress the largest closed, completed ranges that no longer need verbatim context, batching independent non-overlapping ranges in one call. Keep active work and recent tool evidence; do not release anything until its durable facts are stored.
 `

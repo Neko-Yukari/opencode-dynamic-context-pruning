@@ -33,7 +33,7 @@ const MODEL_SELECTION_COMPRESS_TRIGGER_PROMPT = [
     "Manual mode trigger received. Select older, genuinely finished closed ranges for the compress tool.",
     "Pass only topic and content: [{ startId, endId }] using observed IDs; the configured summarizer writes the summary, so do not write or pass one yourself.",
     "Skip active or unresolved work, messages still waiting on a user answer, raw output needed for exact verification, and this trigger. If no safely closed range exists, continue without compressing and explain why.",
-    "Release is one-way: use `dcp_release` only for completed history that is no longer needed at all.",
+    "Release is one-way for automatic context: use `dcp_release` only for completed history that is no longer needed, and only after durable facts are stored in a summary, session note or memory. Released originals remain readable through `dcp_read`.",
     "Return after compress with a brief explanation of what content was compressed.",
 ].join("\n\n")
 
