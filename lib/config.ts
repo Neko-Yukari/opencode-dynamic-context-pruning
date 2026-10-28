@@ -30,10 +30,18 @@ export interface Deduplication {
  */
 export type ContextLimitValue = number | string
 
+export interface AutoFoldConfig {
+    enabled: boolean
+    targetTokens: number
+    minGrowthTokens: number
+    keepRecentMessages: number
+}
+
 export interface CompressConfig {
     model?: string
     fallbackModels?: string[]
     modelTimeoutMs?: number
+    autoFold: AutoFoldConfig
     mode: CompressMode
     permission: Permission
     showCompression: boolean
@@ -136,6 +144,11 @@ export const VALID_CONFIG_KEYS = new Set([
     "compress.model",
     "compress.fallbackModels",
     "compress.modelTimeoutMs",
+    "compress.autoFold",
+    "compress.autoFold.enabled",
+    "compress.autoFold.targetTokens",
+    "compress.autoFold.minGrowthTokens",
+    "compress.autoFold.keepRecentMessages",
     "compress.mode",
     "compress.permission",
     "compress.showCompression",
@@ -427,6 +440,74 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     expected: "positive integer milliseconds",
                     actual: "invalid timeout",
                 })
+            }
+
+            if (compress.autoFold !== undefined) {
+                const autoFold = compress.autoFold
+                if (
+                    typeof autoFold !== "object" ||
+                    autoFold === null ||
+                    Array.isArray(autoFold)
+                ) {
+                    errors.push({
+                        key: "compress.autoFold",
+                        expected: "object",
+                        actual: typeof autoFold,
+                    })
+                } else {
+                    if (
+                        autoFold.enabled !== undefined &&
+                        typeof autoFold.enabled !== "boolean"
+                    ) {
+                        errors.push({
+                            key: "compress.autoFold.enabled",
+                            expected: "boolean",
+                            actual: typeof autoFold.enabled,
+                        })
+                    }
+                    if (autoFold.targetTokens !== undefined) {
+                        if (
+                            !Number.isSafeInteger(autoFold.targetTokens) ||
+                            autoFold.targetTokens <= 0
+                        ) {
+                            errors.push({
+                                key: "compress.autoFold.targetTokens",
+                                expected: "positive integer tokens",
+                                actual: `${JSON.stringify(autoFold.targetTokens)}`,
+                            })
+                        }
+                    }
+                    if (
+                        autoFold.minGrowthTokens !== undefined &&
+                        (!Number.isSafeInteger(autoFold.minGrowthTokens) ||
+                            autoFold.minGrowthTokens < 0)
+                    ) {
+                        errors.push({
+                            key: "compress.autoFold.minGrowthTokens",
+                            expected: "non-negative integer tokens",
+                            actual: `${JSON.stringify(autoFold.minGrowthTokens)}`,
+                        })
+                    }
+                    if (
+                        autoFold.keepRecentMessages !== undefined &&
+                        (!Number.isSafeInteger(autoFold.keepRecentMessages) ||
+                            autoFold.keepRecentMessages < 0)
+                    ) {
+                        errors.push({
+                            key: "compress.autoFold.keepRecentMessages",
+                            expected: "non-negative integer messages",
+                            actual: `${JSON.stringify(autoFold.keepRecentMessages)}`,
+                        })
+                    }
+                    // Enabling without a target can never trigger a fold.
+                    if (autoFold.enabled === true && autoFold.targetTokens === undefined) {
+                        errors.push({
+                            key: "compress.autoFold.targetTokens",
+                            expected: "positive integer tokens when autoFold is enabled",
+                            actual: "missing",
+                        })
+                    }
+                }
             }
 
             if (
@@ -748,6 +829,12 @@ const defaultConfig: PluginConfig = {
         permission: "allow",
         showCompression: false,
         summaryBuffer: true,
+        autoFold: {
+            enabled: false,
+            targetTokens: 100_000,
+            minGrowthTokens: 4_096,
+            keepRecentMessages: 3,
+        },
         maxContextLimit: "500k/50%",
         minContextLimit: "250k/25%",
         nudgeFrequency: 5,
@@ -912,6 +999,16 @@ function mergeCompress(
         model: override.model ?? base.model,
         fallbackModels: override.fallbackModels ?? base.fallbackModels,
         modelTimeoutMs: override.modelTimeoutMs ?? base.modelTimeoutMs,
+        autoFold: override.autoFold
+            ? {
+                  enabled: override.autoFold.enabled ?? base.autoFold.enabled,
+                  targetTokens: override.autoFold.targetTokens ?? base.autoFold.targetTokens,
+                  minGrowthTokens:
+                      override.autoFold.minGrowthTokens ?? base.autoFold.minGrowthTokens,
+                  keepRecentMessages:
+                      override.autoFold.keepRecentMessages ?? base.autoFold.keepRecentMessages,
+              }
+            : base.autoFold,
         permission: override.permission ?? base.permission,
         showCompression: override.showCompression ?? base.showCompression,
         summaryBuffer: override.summaryBuffer ?? base.summaryBuffer,
@@ -982,6 +1079,7 @@ function deepCloneConfig(config: PluginConfig): PluginConfig {
         protectedFilePatterns: [...config.protectedFilePatterns],
         compress: {
             ...config.compress,
+            autoFold: { ...config.compress.autoFold },
             modelMaxLimits: { ...config.compress.modelMaxLimits },
             modelMinLimits: { ...config.compress.modelMinLimits },
             protectedTools: [...config.compress.protectedTools],

@@ -4,6 +4,7 @@ import { getConfig } from "../config"
 import { Logger } from "../logger"
 import { PromptStore } from "../prompts/store"
 import { createCompressMessageTool, createCompressRangeTool } from "../compress"
+import { runAutoFold } from "../compress/autofold"
 import { attachCompressionDuration } from "../compress/state"
 import { createCommandExecuteHandler, createSystemPromptHandler } from "../hooks"
 import {
@@ -66,6 +67,8 @@ export async function setup(ctx: Plugin.Context) {
     const logger = new Logger(config.debug)
     const notes = createNotes(ctx.storage)
     const fullHistory = createFullHistoryReader(ctx)
+    // One summarizer instance serves both the compress tool and auto-fold.
+    const summarizer = createSummarizer(ctx)
     const prompts = new PromptStore(
         logger,
         ctx.location.directory,
@@ -198,6 +201,16 @@ export async function setup(ctx: Plugin.Context) {
             state.modelContextLimit = limit?.context
             state.modelOutputLimit = limit?.output
             state.systemPromptTokens = countTokens(event.system.map((part) => part.text).join("\n"))
+            if (kind === "context") {
+                // Billion-context-style reduction before the request is forwarded.
+                // It only creates ordinary blocks, so prune() below injects the
+                // summary in this same request. Failures leave context untouched.
+                await runAutoFold({
+                    ctx: { client, state, logger, config, prompts, summarizer },
+                    sessionID: event.sessionID,
+                    messages,
+                })
+            }
             const view = project(event.messages, entries, {
                 ...session,
                 agent: event.agent,
@@ -374,7 +387,7 @@ export async function setup(ctx: Plugin.Context) {
                 logger,
                 config,
                 prompts,
-                summarizer: createSummarizer(ctx),
+                summarizer,
             })
         const definition = define(createSessionState("compact"))
         await ctx.tool.transform((editor) =>

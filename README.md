@@ -98,6 +98,47 @@ Native compaction starts a new host history. DCP clears its summaries, compressi
 
 Released regions stay omitted, and old block references stop working after compaction. `dcp_read` can still read originals by source message ID, and search still covers them, as long as the host retains the underlying message rows.
 
+### Automatic pre-request folding (OpenCode V2)
+
+`compress.autoFold` keeps a large-window model on a much smaller resident context.
+Before a request is forwarded, DCP measures the actual context tokens and, when the
+context is above `targetTokens + minGrowthTokens`, folds the oldest safe contiguous
+history into ordinary compression blocks. Nothing shells out and the model-visible
+compress tool is not called: the fold reuses the same internal range path, so block
+state, statistics, readback and release behavior stay identical.
+
+```jsonc
+{
+    "compress": {
+        "autoFold": {
+            "enabled": true,
+            // Keep roughly 100k resident context on a 1M-token model
+            "targetTokens": 100000,
+            "minGrowthTokens": 4096,
+            "keepRecentMessages": 3,
+        },
+        // Optional: let a dedicated model write the folded summaries
+        "model": "anthropic/claude-haiku-4-5",
+    },
+}
+```
+
+Safety rules:
+
+- Never runs in subagents, internal agent calls, denied or `ask` permission, manual
+  mode, or when the target is not exceeded.
+- At most one fold pass per request, with hysteresis from `minGrowthTokens`.
+- The newest `keepRecentMessages` messages, the active turn and any pending or running
+  tool calls are always retained, and ranges never overlap an active block.
+- With `compress.model` set, the configured model authors each folded summary. Without
+  it, DCP writes a clearly labelled mechanical digest instead of pretending a summary
+  was authored.
+- Failures fail open: the original context is left untouched and a warning is logged.
+
+Folded summaries render a concise visible title derived from the compression topic, for
+example `Title: Auto-fold: 412k -> 100k`, above the summary body. The
+`[Compressed conversation section]` marker and the `dcp_read` footer are unchanged.
+
 ### Read original details
 
 The model can call `dcp_read` for a specific historical detail missing from its current context and needed for its task. It does not need to routinely reload history or verify the already injected session note. `dcp_read` reads the full observable history of the current session, including released ranges and messages from before native compaction:
@@ -321,6 +362,20 @@ Each level overrides the previous, so project settings take priority over global
         // Preserve your messages during compression.
         // Warning: large copy-pasted prompts will never be compressed away
         "protectUserMessages": false,
+        // Automatic pre-request folding (OpenCode V2). Off by default.
+        // When enabled, DCP folds the oldest safe history into ordinary
+        // compression blocks before a request is forwarded, so a large-window
+        // model can keep a much smaller resident context.
+        "autoFold": {
+            "enabled": false,
+            // Resident context budget in tokens. Folding only runs above
+            // targetTokens + minGrowthTokens.
+            "targetTokens": 100000,
+            // Hysteresis so small fluctuations cannot trigger repeated folds
+            "minGrowthTokens": 4096,
+            // Newest messages always retained; the active turn is always kept
+            "keepRecentMessages": 3,
+        },
     },
     // Automatic pruning strategies
     "strategies": {

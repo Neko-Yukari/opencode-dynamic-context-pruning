@@ -122,6 +122,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                     blockId,
                     summaryWithTools,
                     ctx.state.idFormat,
+                    plan.entry.topic,
                 )
                 const summaryTokens = countTokens(storedSummary)
 

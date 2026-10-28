@@ -38,6 +38,18 @@ export async function prepareSession(
     ctx: ToolContext,
     toolCtx: RunContext,
     title: string,
+    options?: {
+        /**
+         * Internal callers (auto-fold) already checked permission and must never
+         * raise a host permission prompt from inside the context hook.
+         */
+        skipPermission?: boolean
+        /**
+         * Internal callers must not change strategy state: auto-fold only creates
+         * compression blocks and never silently prunes tool output.
+         */
+        skipStrategies?: boolean
+    },
 ): Promise<PreparedSession> {
     await refreshManualMode(ctx.state, toolCtx.sessionID, ctx.logger, ctx.config.manualMode.enabled)
 
@@ -47,12 +59,14 @@ export async function prepareSession(
         )
     }
 
-    await toolCtx.ask({
-        permission: "compress",
-        patterns: ["*"],
-        always: ["*"],
-        metadata: {},
-    })
+    if (!options?.skipPermission) {
+        await toolCtx.ask({
+            permission: "compress",
+            patterns: ["*"],
+            always: ["*"],
+            metadata: {},
+        })
+    }
 
     toolCtx.metadata({ title })
 
@@ -69,8 +83,10 @@ export async function prepareSession(
 
     assignMessageRefs(ctx.state, rawMessages)
 
-    deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
-    purgeErrors(ctx.state, ctx.logger, ctx.config, rawMessages)
+    if (!options?.skipStrategies) {
+        deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
+        purgeErrors(ctx.state, ctx.logger, ctx.config, rawMessages)
+    }
 
     return {
         rawMessages,

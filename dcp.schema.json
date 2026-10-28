@@ -149,6 +149,36 @@
                     "minimum": 1,
                     "description": "Optional inference timeout. By default derived from estimated selected input and model output budget."
                 },
+                "autoFold": {
+                    "type": "object",
+                    "description": "Automatic pre-request folding: reduce resident context before the request is forwarded, using ordinary compression blocks. Disabled by default.",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Enable automatic pre-request folding (OpenCode V2 context hook only)."
+                        },
+                        "targetTokens": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 100000,
+                            "description": "Resident context budget. Folding runs only while the measured context is above targetTokens + minGrowthTokens, and stops selecting history once the reduction reaches the target."
+                        },
+                        "minGrowthTokens": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 4096,
+                            "description": "Hysteresis above targetTokens before a fold may run, so small fluctuations cannot trigger repeated folds."
+                        },
+                        "keepRecentMessages": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 3,
+                            "description": "Newest visible messages always retained. The active turn and any pending tool calls are retained regardless of this value."
+                        }
+                    }
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["range", "message"],
@@ -269,6 +299,12 @@
                 "permission": "allow",
                 "showCompression": false,
                 "summaryBuffer": true,
+                "autoFold": {
+                    "enabled": false,
+                    "targetTokens": 100000,
+                    "minGrowthTokens": 4096,
+                    "keepRecentMessages": 3
+                },
                 "maxContextLimit": 100000,
                 "minContextLimit": 50000,
                 "nudgeFrequency": 5,

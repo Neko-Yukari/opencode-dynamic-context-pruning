@@ -3,6 +3,25 @@ import { formatBlockRef, formatMessageIdTag, type IdFormat } from "../message-id
 import type { AppliedCompressionResult, CompressionStateInput, SelectionResolution } from "./types"
 
 export const COMPRESSED_BLOCK_HEADER = "[Compressed conversation section]"
+export const COMPRESSED_BLOCK_TITLE_PREFIX = "Title: "
+const TITLE_MAX_CHARS = 120
+
+// Titles are rendered into model-visible context, so keep them a single short
+// line: no newlines, no repeated whitespace, no unbounded length.
+function renderTitle(title: string | undefined): string {
+    if (typeof title !== "string") {
+        return ""
+    }
+    const collapsed = title.replace(/\s+/g, " ").trim()
+    if (collapsed.length === 0) {
+        return ""
+    }
+    const capped =
+        collapsed.length > TITLE_MAX_CHARS
+            ? `${collapsed.slice(0, TITLE_MAX_CHARS - 1).trimEnd()}…`
+            : collapsed
+    return `${COMPRESSED_BLOCK_TITLE_PREFIX}${capped}`
+}
 
 export function allocateBlockId(state: SessionState): number {
     const next = state.prune.messages.nextBlockId
@@ -53,15 +72,18 @@ export function wrapCompressedSummary(
     blockId: number,
     summary: string,
     format: IdFormat = "xml",
+    title?: string,
 ): string {
     const header = COMPRESSED_BLOCK_HEADER
     const ref = formatBlockRef(blockId, format)
     const footer = `Originals: dcp_read({"startId":"${ref}"})\n${formatMessageIdTag(ref, undefined, format)}`
     const body = summary.trim()
+    const titleLine = renderTitle(title)
+    const head = titleLine.length > 0 ? `${header}\n${titleLine}` : header
     if (body.length === 0) {
-        return `${header}\n${footer}`
+        return `${head}\n${footer}`
     }
-    return `${header}\n${body}\n\n${footer}`
+    return `${head}\n${body}\n\n${footer}`
 }
 
 export function applyCompressionState(

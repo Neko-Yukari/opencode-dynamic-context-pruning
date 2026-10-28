@@ -1,41 +1,18 @@
 import { tool } from "@opencode-ai/plugin"
 import type { ToolContext } from "./types"
-import { countTokens } from "../token-utils"
 import { rangeFormat } from "../prompts/extensions/tool"
 import { formatMessageRef, formatBlockRef, type IdFormat } from "../message-ids"
-import { finalizeSession, prepareSession, type NotificationEntry } from "./pipeline"
+import { finalizeSession, prepareSession } from "./pipeline"
 import {
-    appendProtectedPromptInfo,
-    appendProtectedTools,
-    appendProtectedUserMessages,
-} from "./protected-content"
-import {
-    parseBlockPlaceholders,
     resolveRanges,
-    stripBlockPlaceholders,
     validateArgs,
     validateNonOverlapping,
     validateSelectionArgs,
 } from "./range-utils"
-import {
-    COMPRESSED_BLOCK_HEADER,
-    allocateBlockId,
-    allocateRunId,
-    applyCompressionState,
-    wrapCompressedSummary,
-} from "./state"
+import { COMPRESSED_BLOCK_HEADER } from "./state"
+import { compressResolvedRanges } from "./apply-range"
 import type { CompressRangeArgsInput, CompressRangeToolArgs } from "./types"
-import {
-    estimate,
-    generateSummary,
-    selectedSource,
-    redact,
-    MODEL_SELECTION_INSTRUCTIONS,
-    summaryBudget,
-} from "./model"
-import type { SessionState } from "../state"
-import { saveSessionState } from "../state/persistence"
-import { assertCompressedContextFits } from "./capacity"
+import { estimate, generateSummary, selectedSource, MODEL_SELECTION_INSTRUCTIONS, summaryBudget } from "./model"
 import { markNoteInjection } from "../notes"
 
 function buildSchema(format: IdFormat, configured: boolean) {
@@ -118,140 +95,29 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
             )
                 throw new Error("DCP model compression cannot include its active compression call")
 
-            const notifications: NotificationEntry[] = []
-            const preparedPlans: Array<{
-                entry: (typeof resolvedPlans)[number]["entry"]
-                selection: (typeof resolvedPlans)[number]["selection"]
-                anchorMessageId: string
-                finalSummary: string
-                consumedBlockIds: number[]
-            }> = []
-            let totalCompressedMessages = 0
-            let summaryReplyTokens = 0
-
-            for (const plan of resolvedPlans) {
-                const source = configured
-                    ? selectedSource(plan.selection, searchContext, ctx.state.idFormat)
-                    : undefined
-                if (configured) {
-                    plan.entry.summary = await generateSummary(
-                        ctx,
-                        input.topic,
-                        source!,
-                        toolCtx.abort,
-                    )
-                }
-                if (source) {
-                    summaryReplyTokens += 5 * summaryBudget(estimate(source.text))
-                }
-                const rewritten = stripBlockPlaceholders(
-                    plan.entry.summary,
-                    parseBlockPlaceholders(plan.entry.summary, ctx.state.idFormat),
-                )
-
-                const summaryWithUsers = appendProtectedUserMessages(
-                    rewritten,
-                    plan.selection,
-                    searchContext,
-                    ctx.state,
-                    ctx.config.compress.protectUserMessages,
-                )
-
-                const summaryWithPromptInfo = appendProtectedPromptInfo(
-                    summaryWithUsers,
-                    plan.selection,
-                    searchContext,
-                    ctx.state,
-                    ctx.config.compress.protectTags,
-                )
-
-                const summaryWithTools = await appendProtectedTools(
-                    ctx.client,
-                    ctx.state,
-                    ctx.config.experimental.allowSubAgents,
-                    summaryWithPromptInfo,
-                    plan.selection,
-                    searchContext,
-                    ctx.config.compress.protectedTools,
-                    ctx.config.protectedFilePatterns,
-                )
-
-                // Selected blocks are rewritten, so no old block body is appended.
-                const finalSummary = source
-                    ? (redact(source.media.transform(summaryWithTools)) as string)
-                    : summaryWithTools
-                await source?.media.save()
-
-                preparedPlans.push({
-                    entry: plan.entry,
-                    selection: plan.selection,
-                    anchorMessageId: plan.anchorMessageId,
-                    finalSummary,
-                    consumedBlockIds: [...plan.selection.requiredBlockIds],
-                })
-            }
-
-            if (configured) toolCtx.abort.throwIfAborted()
-            // Stage the whole batch, persist it strictly, then publish. A failed write
-            // must not leave a half-applied live state or report success.
-            const staged: SessionState = {
-                ...ctx.state,
-                prune: {
-                    ...ctx.state.prune,
-                    messages: structuredClone(ctx.state.prune.messages),
-                },
-                stats: { ...ctx.state.stats },
-            }
-            const runId = allocateRunId(staged)
-
-            for (const preparedPlan of preparedPlans) {
-                const blockId = allocateBlockId(staged)
-                const storedSummary = wrapCompressedSummary(
-                    blockId,
-                    preparedPlan.finalSummary,
-                    staged.idFormat,
-                )
-                const summaryTokens = countTokens(storedSummary)
-
-                const applied = applyCompressionState(
-                    staged,
-                    {
-                        topic: input.topic,
-                        batchTopic: input.topic,
-                        startId: preparedPlan.entry.startId,
-                        endId: preparedPlan.entry.endId,
-                        mode: "range",
-                        runId,
-                        compressMessageId: toolCtx.messageID,
-                        compressCallId: callId,
-                        summaryTokens,
-                    },
-                    preparedPlan.selection,
-                    preparedPlan.anchorMessageId,
-                    blockId,
-                    storedSummary,
-                    preparedPlan.consumedBlockIds,
-                )
-
-                totalCompressedMessages += applied.messageIds.length
-
-                notifications.push({
-                    blockId,
-                    runId,
-                    summary: preparedPlan.finalSummary,
-                    summaryTokens,
-                })
-            }
-
-            assertCompressedContextFits(
+            const { notifications, totalCompressedMessages } = await compressResolvedRanges({
                 ctx,
-                staged,
                 rawMessages,
-                configured ? summaryReplyTokens : undefined,
-            )
-            await saveSessionState(staged, ctx.logger)
-            ctx.state.prune = staged.prune
-            ctx.state.stats = staged.stats
+                searchContext,
+                plans: resolvedPlans,
+                topic: input.topic,
+                compressMessageId: toolCtx.messageID,
+                compressCallId: callId,
+                summaryFor: async (plan) => {
+                    if (configured) toolCtx.abort.throwIfAborted()
+                    const source = configured
+                        ? selectedSource(plan.selection, searchContext, ctx.state.idFormat)
+                        : undefined
+                    const body = configured
+                        ? await generateSummary(ctx, input.topic, source!, toolCtx.abort)
+                        : plan.entry.summary
+                    return {
+                        body,
+                        source,
+                        replyTokens: source ? 5 * summaryBudget(estimate(source.text)) : 0,
+                    }
+                },
+            })
             markNoteInjection(ctx.state.sessionId)
 
             // State is already persisted: a notification failure must not be
