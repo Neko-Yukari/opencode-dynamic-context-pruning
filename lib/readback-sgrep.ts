@@ -33,7 +33,7 @@ function searchRuntime() {
 }
 
 // This receives only the already-redacted observable JSON used by dcp_read.
-function sourceText(record: OriginalRecord): string {
+export function sourceText(record: OriginalRecord): string {
     const parts = JSON.parse(record.text) as Array<Record<string, unknown>>
     return parts
         .flatMap((part) =>
