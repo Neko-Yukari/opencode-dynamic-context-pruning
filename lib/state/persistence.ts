@@ -8,7 +8,13 @@ import * as fs from "fs/promises"
 import { existsSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
-import type { CompressionBlock, PrunedMessageEntry, SessionState, SessionStats } from "./types"
+import type {
+    CompressionBlock,
+    PreparedAutoFold,
+    PrunedMessageEntry,
+    SessionState,
+    SessionStats,
+} from "./types"
 import type { Logger } from "../logger"
 import { serializePruneMessagesState, serializeMessageIdState } from "./utils"
 import type { PersistedMessageIdState } from "./utils"
@@ -45,6 +51,8 @@ export interface PersistedSessionState {
     // Optional so older files keep loading.
     messageIds?: PersistedMessageIdState
     lastCompaction?: number
+    /** Summarized auto-fold waiting for the next request after a restart. */
+    autoFold?: PreparedAutoFold | null
 }
 
 const STORAGE_DIR = join(
@@ -107,6 +115,7 @@ export async function saveSessionState(
         stats: sessionState.stats,
         messageIds: serializeMessageIdState(sessionState),
         lastCompaction: sessionState.lastCompaction,
+        autoFold: sessionState.preparedAutoFold ?? null,
         lastUpdated: new Date().toISOString(),
     }
     await writePersistedSessionState(sessionState.sessionId, state, logger)

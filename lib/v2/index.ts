@@ -4,7 +4,7 @@ import { getConfig } from "../config"
 import { Logger } from "../logger"
 import { PromptStore } from "../prompts/store"
 import { createCompressMessageTool, createCompressRangeTool } from "../compress"
-import { runAutoFold } from "../compress/autofold"
+import { prepareAutoFold, projectAutoFold } from "../compress/autofold"
 import { attachCompressionDuration } from "../compress/state"
 import { createCommandExecuteHandler, createSystemPromptHandler } from "../hooks"
 import {
@@ -41,11 +41,29 @@ import { consumeNoteInjection, createNotes } from "../notes"
 import { createReleaseTool } from "../release"
 import { createFullHistoryReader } from "./full-history"
 import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
+import { createNotifier } from "./notify"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
+// That is exactly why the auto-fold notices use synthetic() instead: the user
+// asked for chat-visible notices shaped like peer messages, and peer messages
+// reach the model the same way.
 export async function report(logger: Logger, text: string, sessionID?: string) {
     logger.debug("V2 report (display pending)", { sessionID, text })
+}
+
+// A finished turn is the only safe moment to spend a summarizer call.
+const FOLD_PREPARE_EVENTS = new Set([
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+])
+
+function sameDirectory(left: string | undefined, right: string): boolean {
+    if (left === undefined) return true
+    const normalize = (value: string) =>
+        value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+    return normalize(left) === normalize(right)
 }
 
 export async function setup(ctx: Plugin.Context) {
@@ -174,6 +192,44 @@ export async function setup(ctx: Plugin.Context) {
             )
     }
 
+    const notify = createNotifier(ctx, logger)
+
+    // Auto-fold prepare runs after the turn ends, never inside a request. The
+    // context hook below only projects what this prepared.
+    const foldAbort = new AbortController()
+    if (config.compress.autoFold?.enabled === true)
+        void (async () => {
+            try {
+                for await (const event of ctx.event.subscribe({ signal: foldAbort.signal })) {
+                    if (!FOLD_PREPARE_EVENTS.has(event.type)) continue
+                    const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+                    if (typeof sessionID !== "string") continue
+                    const { location } = event as { location?: { directory?: string } }
+                    if (!sameDirectory(location?.directory, ctx.location.directory)) continue
+                    try {
+                        const { state, messages } = await load(sessionID)
+                        const prepared = await prepareAutoFold({
+                            ctx: { client, state, logger, config, prompts, summarizer },
+                            sessionID,
+                            messages,
+                            notify,
+                        })
+                        logger.debug("DCP auto-fold prepare pass", { sessionID, ...prepared })
+                    } catch (error) {
+                        logger.warn("DCP auto-fold prepare skipped", {
+                            sessionID,
+                            error: (error as Error)?.message ?? String(error),
+                        })
+                    }
+                }
+            } catch (error) {
+                if (!foldAbort.signal.aborted)
+                    logger.warn("DCP auto-fold event stream stopped", {
+                        error: (error as Error)?.message ?? String(error),
+                    })
+            }
+        })()
+
     await ctx.model.transform((editor) => {
         limits.clear()
         for (const model of editor.list())
@@ -202,13 +258,14 @@ export async function setup(ctx: Plugin.Context) {
             state.modelOutputLimit = limit?.output
             state.systemPromptTokens = countTokens(event.system.map((part) => part.text).join("\n"))
             if (kind === "context") {
-                // Billion-context-style reduction before the request is forwarded.
-                // It only creates ordinary blocks, so prune() below injects the
-                // summary in this same request. Failures leave context untouched.
-                await runAutoFold({
+                // Local substitution of a fold prepared after the previous turn:
+                // no model call on this path, and a missing or stale artifact only
+                // logs a reason instead of blocking the request.
+                await projectAutoFold({
                     ctx: { client, state, logger, config, prompts, summarizer },
                     sessionID: event.sessionID,
                     messages,
+                    notify,
                 })
             }
             const view = project(event.messages, entries, {
@@ -503,6 +560,7 @@ export async function setup(ctx: Plugin.Context) {
     })
     logger.info("DCP V2 initialized")
     return () => {
+        foldAbort.abort()
         sessions.clear()
         limits.clear()
     }

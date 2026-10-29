@@ -194,4 +194,6 @@ export function resetOnCompaction(state: SessionState): void {
         turnNudgeAnchors: new Set<string>(),
         iterationNudgeAnchors: new Set<string>(),
     }
+    // A prepared fold was summarized from pre-compaction history; keep neither.
+    state.preparedAutoFold = null
 }
