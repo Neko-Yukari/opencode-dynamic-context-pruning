@@ -110,14 +110,24 @@ that prepared artifact, reusing the same internal range path as the manual
 compress tool, so block state, protection, statistics, readback and release
 behavior stay identical.
 
+`targetTokens`, `minGrowthTokens` and `minFoldTokens` accept the same specs as
+`compress.maxContextLimit`: plain tokens (`100000`), suffixed tokens (`100k`,
+`1m`), a percent of the model context window (`10%`), or two specs joined by `/`
+(`100k/10%`) where the lower resolved value wins. Percentages need the model
+window the host reports for the current model; when the window is not known yet,
+auto-fold stays off and logs why instead of assuming a window size. That is what
+keeps a `100k/10%` target proportional when the session moves to a smaller model.
+
 ```jsonc
 {
     "compress": {
         "autoFold": {
             "enabled": true,
-            // Keep roughly 100k resident context on a 1M-token model
-            "targetTokens": 100000,
-            "minGrowthTokens": 4096,
+            // Keep roughly 100k resident context, but never more than 10% of
+            // the window: on a 200k model the target shrinks to 20k
+            "targetTokens": "100k/10%",
+            // Hysteresis: the smaller of 20k tokens and 20% of the window
+            "minGrowthTokens": "20k/20%",
             // Skip the fold unless the safe ranges can reclaim this much
             "minFoldTokens": 20000,
             "keepRecentMessages": 3,
@@ -127,6 +137,9 @@ behavior stay identical.
     },
 }
 ```
+
+With that configuration the fold runs once the measured context passes
+`100000 + 20000 = 120000` tokens on a 1M-window model.
 
 Safety rules:
 
@@ -389,10 +402,14 @@ Each level overrides the previous, so project settings take priority over global
         // resident context without a model call on the request path.
         "autoFold": {
             "enabled": false,
-            // Resident context budget in tokens. Folding only runs above
+            // Resident context budget. Folding only runs above
             // targetTokens + minGrowthTokens.
+            // Accepts tokens (100000), suffixed tokens ("100k", "1m"), a
+            // percent of the model window ("10%"), or two specs joined by
+            // "/" ("100k/10%") where the lower value wins.
             "targetTokens": 100000,
-            // Hysteresis so small fluctuations cannot trigger repeated folds
+            // Hysteresis so small fluctuations cannot trigger repeated folds,
+            // in the same forms as targetTokens
             "minGrowthTokens": 4096,
             // Newest messages always retained; the active turn is always kept
             "keepRecentMessages": 3,

@@ -32,10 +32,12 @@ export type ContextLimitValue = number | string
 
 export interface AutoFoldConfig {
     enabled: boolean
-    targetTokens: number
-    minGrowthTokens: number
+    /** Resident context budget; resolved like `maxContextLimit`. */
+    targetTokens: ContextLimitValue
+    /** Hysteresis above the target; resolved like `maxContextLimit`. */
+    minGrowthTokens: ContextLimitValue
     /** Smallest reduction worth a summarizer call. Zero keeps every safe range. */
-    minFoldTokens: number
+    minFoldTokens: ContextLimitValue
     keepRecentMessages: number
 }
 
@@ -445,6 +447,24 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                 })
             }
 
+            // Auto-fold thresholds accept the same spec syntax as
+            // `compress.maxContextLimit`; a percentage needs a model window at
+            // runtime, which config load cannot know, so it is valid here.
+            const validateAutoFoldThreshold = (
+                key: string,
+                value: unknown,
+                minimum: number,
+            ): void => {
+                if (typeof value === "number" && Number.isSafeInteger(value) && value >= minimum)
+                    return
+                if (typeof value === "string" && isValidContextLimitSpec(value)) return
+                errors.push({
+                    key,
+                    expected: `${minimum > 0 ? "positive" : "non-negative"} integer tokens or "100k" | "10%" | "100k/10%"`,
+                    actual: `${JSON.stringify(value)}`,
+                })
+            }
+
             if (compress.autoFold !== undefined) {
                 const autoFold = compress.autoFold
                 if (
@@ -469,37 +489,25 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                         })
                     }
                     if (autoFold.targetTokens !== undefined) {
-                        if (
-                            !Number.isSafeInteger(autoFold.targetTokens) ||
-                            autoFold.targetTokens <= 0
-                        ) {
-                            errors.push({
-                                key: "compress.autoFold.targetTokens",
-                                expected: "positive integer tokens",
-                                actual: `${JSON.stringify(autoFold.targetTokens)}`,
-                            })
-                        }
+                        validateAutoFoldThreshold(
+                            "compress.autoFold.targetTokens",
+                            autoFold.targetTokens,
+                            1,
+                        )
                     }
-                    if (
-                        autoFold.minGrowthTokens !== undefined &&
-                        (!Number.isSafeInteger(autoFold.minGrowthTokens) ||
-                            autoFold.minGrowthTokens < 0)
-                    ) {
-                        errors.push({
-                            key: "compress.autoFold.minGrowthTokens",
-                            expected: "non-negative integer tokens",
-                            actual: `${JSON.stringify(autoFold.minGrowthTokens)}`,
-                        })
+                    if (autoFold.minGrowthTokens !== undefined) {
+                        validateAutoFoldThreshold(
+                            "compress.autoFold.minGrowthTokens",
+                            autoFold.minGrowthTokens,
+                            0,
+                        )
                     }
-                    if (
-                        autoFold.minFoldTokens !== undefined &&
-                        (!Number.isSafeInteger(autoFold.minFoldTokens) || autoFold.minFoldTokens < 0)
-                    ) {
-                        errors.push({
-                            key: "compress.autoFold.minFoldTokens",
-                            expected: "non-negative integer tokens",
-                            actual: `${JSON.stringify(autoFold.minFoldTokens)}`,
-                        })
+                    if (autoFold.minFoldTokens !== undefined) {
+                        validateAutoFoldThreshold(
+                            "compress.autoFold.minFoldTokens",
+                            autoFold.minFoldTokens,
+                            0,
+                        )
                     }
                     if (
                         autoFold.keepRecentMessages !== undefined &&
@@ -516,7 +524,8 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     if (autoFold.enabled === true && autoFold.targetTokens === undefined) {
                         errors.push({
                             key: "compress.autoFold.targetTokens",
-                            expected: "positive integer tokens when autoFold is enabled",
+                            expected:
+                                'positive tokens or spec such as "100k" | "10%" | "100k/10%" when autoFold is enabled',
                             actual: "missing",
                         })
                     }

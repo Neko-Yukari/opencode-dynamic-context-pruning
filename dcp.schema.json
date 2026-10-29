@@ -160,22 +160,46 @@
                             "description": "Enable automatic end-of-turn folding (OpenCode V2: prepare after the turn, project in the context hook)."
                         },
                         "targetTokens": {
-                            "type": "integer",
-                            "minimum": 1,
+                            "description": "Resident context budget. Folding runs only while the measured context is above targetTokens + minGrowthTokens, and stops selecting history once the reduction reaches the target. Accepts tokens (100000), suffixed tokens (\"100k\", \"1m\"), a percent of the model context window (\"10%\"), or two specs joined by \"/\" (\"100k/10%\") where the lower resolved value wins. A percent needs a known model window; without one the fold stays off.",
                             "default": 100000,
-                            "description": "Resident context budget. Folding runs only while the measured context is above targetTokens + minGrowthTokens, and stops selecting history once the reduction reaches the target."
+                            "oneOf": [
+                                {
+                                    "type": "number",
+                                    "minimum": 1
+                                },
+                                {
+                                    "type": "string",
+                                    "pattern": "^\\d+(?:\\.\\d+)?(?:[kKmM]|%)?(?:/\\d+(?:\\.\\d+)?(?:[kKmM]|%)?)?$"
+                                }
+                            ]
                         },
                         "minGrowthTokens": {
-                            "type": "integer",
-                            "minimum": 0,
+                            "description": "Hysteresis above targetTokens before a fold may run, so small fluctuations cannot trigger repeated folds. Accepts the same tokens, suffixed tokens, percent, or \"/\" joined specs as targetTokens, where the lower resolved value wins.",
                             "default": 4096,
-                            "description": "Hysteresis above targetTokens before a fold may run, so small fluctuations cannot trigger repeated folds."
+                            "oneOf": [
+                                {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "string",
+                                    "pattern": "^\\d+(?:\\.\\d+)?(?:[kKmM]|%)?(?:/\\d+(?:\\.\\d+)?(?:[kKmM]|%)?)?$"
+                                }
+                            ]
                         },
                         "minFoldTokens": {
-                            "type": "integer",
-                            "minimum": 0,
+                            "description": "Smallest reduction worth a summarizer call. When the safe ranges can only reclaim less than this, the fold is skipped and the context is left untouched. Accepts the same tokens, suffixed tokens, percent, or \"/\" joined specs as targetTokens, where the lower resolved value wins.",
                             "default": 0,
-                            "description": "Smallest reduction worth a summarizer call. When the safe ranges can only reclaim less than this, the fold is skipped and the context is left untouched."
+                            "oneOf": [
+                                {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "string",
+                                    "pattern": "^\\d+(?:\\.\\d+)?(?:[kKmM]|%)?(?:/\\d+(?:\\.\\d+)?(?:[kKmM]|%)?)?$"
+                                }
+                            ]
                         },
                         "keepRecentMessages": {
                             "type": "integer",

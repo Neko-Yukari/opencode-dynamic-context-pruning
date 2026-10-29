@@ -19,6 +19,7 @@ import {
     formatAutoFoldEndNotice,
     prepareAutoFold,
     projectAutoFold,
+    resolveAutoFold,
     type AutoFoldNotice,
 } from "../lib/compress/autofold"
 import { foldPrepareTrigger, type IdleHookEvent } from "../lib/v2/fold-events"
@@ -298,6 +299,22 @@ test("autoFold config keys and values are validated", () => {
     })
     assert.deepEqual(valid, [])
 
+    // Thresholds accept the same absolute/percentage specs as maxContextLimit.
+    assert.deepEqual(
+        validateConfigTypes({
+            compress: {
+                autoFold: {
+                    enabled: true,
+                    targetTokens: "100k/10%",
+                    minGrowthTokens: "20k/20%",
+                    minFoldTokens: "100k",
+                    keepRecentMessages: 3,
+                },
+            },
+        }),
+        [],
+    )
+
     const keys = (config: Record<string, unknown>) =>
         validateConfigTypes(config).map((error) => error.key)
 
@@ -325,6 +342,143 @@ test("autoFold config keys and values are validated", () => {
             compress: { autoFold: { enabled: true, targetTokens: 1, keepRecentMessages: 1.5 } },
         }).includes("compress.autoFold.keepRecentMessages"),
     )
+    assert.ok(
+        keys({ compress: { autoFold: { enabled: true, targetTokens: "100 k" } } }).includes(
+            "compress.autoFold.targetTokens",
+        ),
+    )
+})
+
+test("auto-fold thresholds resolve absolute and percentage specs against the window", () => {
+    const resolve = (
+        overrides: Partial<PluginConfig["compress"]["autoFold"]>,
+        window?: number,
+    ) => {
+        const state = createSessionState()
+        state.modelContextLimit = window
+        const config = buildConfig(overrides)
+        const ctx = buildContext(`ses_autofold_resolve_${window ?? "none"}`, [], config, {
+            state,
+        })
+        return resolveAutoFold(ctx)
+    }
+
+    // "100k/10%": 100k is smaller than 10% of a 1M window.
+    assert.deepEqual(
+        resolve({ targetTokens: "100k/10%", minGrowthTokens: "20k/20%" }, 1_048_576)
+            .autoFold,
+        {
+            targetTokens: 100_000,
+            minGrowthTokens: 20_000,
+            minFoldTokens: 0,
+            keepRecentMessages: 2,
+        },
+    )
+
+    // Same spec on a 200k window: 10% is smaller than 100k.
+    assert.equal(
+        resolve({ targetTokens: "100k/10%" }, 200_000).autoFold?.targetTokens,
+        20_000,
+    )
+
+    // Plain numbers keep their literal meaning and need no window.
+    assert.deepEqual(
+        resolve({ targetTokens: 1_000, minGrowthTokens: 100, minFoldTokens: 20_000 }).autoFold,
+        {
+            targetTokens: 1_000,
+            minGrowthTokens: 100,
+            minFoldTokens: 20_000,
+            keepRecentMessages: 2,
+        },
+    )
+
+    // Nothing to resolve a percentage against: auto-fold is unavailable, not guessed.
+    const unknownWindow = resolve({ targetTokens: "100k/10%" })
+    assert.equal(unknownWindow.autoFold, undefined)
+    assert.equal(unknownWindow.reason, "disabled")
+})
+
+test("percentage thresholds without a known model window never fold", async () => {
+    const sessionID = `ses_autofold_nowindow_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 500_000)
+    const notices = buildNotices()
+    const logs: string[] = []
+    const ctx = buildContext(
+        sessionID,
+        rawMessages,
+        buildConfig({ targetTokens: "100k/10%" }),
+        { logs },
+    )
+    assert.equal(ctx.state.modelContextLimit, undefined)
+
+    const prepared = await prepareAutoFold({
+        ctx,
+        sessionID,
+        messages: rawMessages,
+        notify: notices.notify,
+    })
+
+    assert.equal(prepared.prepared, false)
+    assert.equal(prepared.reason, "disabled")
+    assert.equal(ctx.state.preparedAutoFold, null)
+    assert.equal(notices.notices.length, 0)
+
+    const folded = await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+    assert.equal(folded.folded, false)
+    assert.equal(folded.reason, "disabled")
+    // The reason is explainable in the debug log instead of silently skipped.
+    assert.ok(
+        logs.some(
+            (line) =>
+                line.startsWith("debug ") && line.includes("no known model context window"),
+        ),
+    )
+})
+
+test("percentage thresholds move the trigger line with the model window", async () => {
+    const window = 1_048_576
+    const config = buildConfig({
+        targetTokens: "100k/10%",
+        minGrowthTokens: "20k/20%",
+    })
+    config.compress.model = "test/model"
+
+    const belowID = `ses_autofold_window_below_${Date.now()}`
+    const belowMessages = buildHistory(belowID, fourTurns(), 119_989)
+    const belowState = createSessionState()
+    belowState.modelContextLimit = window
+    const belowCtx = buildContext(belowID, belowMessages, config, { state: belowState })
+
+    const skipped = await prepareAutoFold({
+        ctx: belowCtx,
+        sessionID: belowID,
+        messages: belowMessages,
+    })
+    // 100k target + 20k growth = 120k trigger.
+    assert.equal(skipped.contextTokens, 119_999)
+    assert.equal(skipped.prepared, false)
+    assert.equal(skipped.reason, "below-target")
+    assert.equal(belowCtx.state.preparedAutoFold, null)
+
+    const aboveID = `ses_autofold_window_above_${Date.now()}`
+    const aboveMessages = buildHistory(aboveID, fourTurns(), 119_991)
+    const aboveState = createSessionState()
+    aboveState.modelContextLimit = window
+    const counter = { calls: 0 }
+    const aboveCtx = buildContext(aboveID, aboveMessages, config, {
+        state: aboveState,
+        summarizer: buildSummarizer(counter),
+    })
+
+    const prepared = await prepareAutoFold({
+        ctx: aboveCtx,
+        sessionID: aboveID,
+        messages: aboveMessages,
+    })
+    assert.equal(prepared.contextTokens, 120_001)
+    assert.equal(prepared.prepared, true)
+    assert.equal(counter.calls, 1)
+    assert.equal(aboveCtx.state.preparedAutoFold?.targetTokens, 100_000)
 })
 
 test("auto-fold is disabled by default and never prepares a fold", async () => {

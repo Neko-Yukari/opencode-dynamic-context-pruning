@@ -1,5 +1,5 @@
-import type { AutoFoldConfig } from "../config"
 import type { PreparedAutoFold, PreparedAutoFoldRange, SessionState, WithParts } from "../state"
+import { resolveContextLimit } from "../context-limit"
 import { countAllMessageTokens } from "../token-utils"
 import { isIgnoredUserMessage } from "../messages/query"
 import { analyzeContextTokens } from "../commands/context"
@@ -336,21 +336,81 @@ function mechanicalDigest(planSummaryBudget: number, source: string): string {
     return `Mechanical digest (no summarizer model configured; excerpts of the folded range, not a model-authored summary):\n${excerpt}`
 }
 
-function resolveConfig(config: ToolContext["config"]): AutoFoldConfig | undefined {
-    const autoFold = config.compress.autoFold
-    if (!autoFold || autoFold.enabled !== true) return undefined
-    if (!Number.isSafeInteger(autoFold.targetTokens) || autoFold.targetTokens <= 0) return undefined
-    return autoFold
+/** Auto-fold thresholds after resolving the configured specs against the model window. */
+export interface ResolvedAutoFold {
+    targetTokens: number
+    minGrowthTokens: number
+    minFoldTokens: number
+    keepRecentMessages: number
+}
+
+export interface AutoFoldResolution {
+    autoFold?: ResolvedAutoFold
+    /** Set when the configuration itself cannot start a fold. */
+    reason?: "disabled" | "invalid-target"
+}
+
+function needsModelWindow(value: unknown): boolean {
+    return typeof value === "string" && value.includes("%")
+}
+
+/**
+ * Resolve the three size thresholds like `compress.maxContextLimit`: plain
+ * tokens, a suffixed count ("100k"), a share of the model window ("10%"), or two
+ * of those joined by "/" ("100k/10%") where the lower value wins. A percentage
+ * is only meaningful against a known window, so with no window cached from the
+ * host the fold is unavailable instead of guessing one; the debug line says why.
+ */
+export function resolveAutoFold(ctx: ToolContext): AutoFoldResolution {
+    const autoFold = ctx.config.compress.autoFold
+    if (!autoFold || autoFold.enabled !== true) return { reason: "disabled" }
+
+    // An integer token count keeps its original meaning: a malformed number is
+    // not silently rounded into a usable target.
+    if (
+        typeof autoFold.targetTokens === "number" &&
+        (!Number.isSafeInteger(autoFold.targetTokens) || autoFold.targetTokens <= 0)
+    ) {
+        return { reason: "invalid-target" }
+    }
+
+    const window = ctx.state.modelContextLimit
+    if (
+        window === undefined &&
+        [autoFold.targetTokens, autoFold.minGrowthTokens, autoFold.minFoldTokens].some(
+            needsModelWindow,
+        )
+    ) {
+        ctx.logger.debug(
+            "DCP auto-fold has percentage thresholds and no known model context window; fold unavailable",
+            {
+                targetTokens: autoFold.targetTokens,
+                minGrowthTokens: autoFold.minGrowthTokens,
+                minFoldTokens: autoFold.minFoldTokens,
+            },
+        )
+        return { reason: "disabled" }
+    }
+
+    const targetTokens = resolveContextLimit(autoFold.targetTokens, window)
+    if (targetTokens === undefined || targetTokens <= 0) return { reason: "invalid-target" }
+
+    return {
+        autoFold: {
+            targetTokens,
+            minGrowthTokens: resolveContextLimit(autoFold.minGrowthTokens, window) ?? 0,
+            minFoldTokens: resolveContextLimit(autoFold.minFoldTokens, window) ?? 0,
+            keepRecentMessages: autoFold.keepRecentMessages,
+        },
+    }
 }
 
 /** Reasons a fold must not run at all in this session, independent of size. */
 export function autoFoldBlocker(
     state: SessionState,
-    config: ToolContext["config"],
+    resolution: AutoFoldResolution,
 ): AutoFoldSkipReason | undefined {
-    if (!resolveConfig(config)) {
-        return config.compress.autoFold?.enabled === true ? "invalid-target" : "disabled"
-    }
+    if (!resolution.autoFold) return resolution.reason ?? "disabled"
     if (state.isSubAgent) return "subagent"
     if (state.compressPermission === "deny" || state.compressPermission === "ask")
         return "permission"
@@ -396,8 +456,9 @@ export async function prepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPre
 
 async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepareResult> {
     const { ctx, sessionID, messages, notify: send } = input
-    const autoFold = resolveConfig(ctx.config)
-    const blocker = autoFoldBlocker(ctx.state, ctx.config)
+    const resolution = resolveAutoFold(ctx)
+    const autoFold = resolution.autoFold
+    const blocker = autoFoldBlocker(ctx.state, resolution)
     const contextTokens = analyzeContextTokens(ctx.state, messages).total
 
     if (!autoFold || blocker) {
@@ -569,8 +630,9 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
  */
 export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldProjectResult> {
     const { ctx, sessionID, messages, notify: send } = input
-    const autoFold = resolveConfig(ctx.config)
-    const blocker = autoFoldBlocker(ctx.state, ctx.config)
+    const resolution = resolveAutoFold(ctx)
+    const autoFold = resolution.autoFold
+    const blocker = autoFoldBlocker(ctx.state, resolution)
     const contextTokens = analyzeContextTokens(ctx.state, messages).total
 
     if (!autoFold || blocker) {
