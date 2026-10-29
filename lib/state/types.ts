@@ -78,6 +78,32 @@ export interface Prune {
     messages: PruneMessagesState
 }
 
+/** One range of a prepared auto-fold, summarized off the request path. */
+export interface PreparedAutoFoldRange {
+    startId: string
+    endId: string
+    /** Summary body for this range, without the application-owned wrapper. */
+    body: string
+    /** Exact units the body was authored over; verified again before projection. */
+    messageIds: string[]
+    requiredBlockIds: number[]
+    sourceTokens: number
+}
+
+/** A fold that is already summarized and waiting for the next request hook. */
+export interface PreparedAutoFold {
+    version: 1
+    sessionID: string
+    /** Visible block title rendered into every folded block. */
+    topic: string
+    /** Real user message of the turn this fold was prepared after. */
+    anchorUserId: string
+    contextTokens: number
+    targetTokens: number
+    createdAt: number
+    ranges: PreparedAutoFoldRange[]
+}
+
 export interface PendingManualTrigger {
     sessionId: string
     prompt: string
@@ -115,4 +141,6 @@ export interface SessionState {
     modelContextLimit: number | undefined
     modelOutputLimit: number | undefined
     systemPromptTokens: number | undefined
+    /** Summarized fold waiting for the next request hook; consumed at most once. */
+    preparedAutoFold: PreparedAutoFold | null
 }
