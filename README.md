@@ -98,14 +98,17 @@ Native compaction starts a new host history. DCP clears its summaries, compressi
 
 Released regions stay omitted, and old block references stop working after compaction. `dcp_read` can still read originals by source message ID, and search still covers them, as long as the host retains the underlying message rows.
 
-### Automatic pre-request folding (OpenCode V2)
+### Automatic end-of-turn folding (OpenCode V2)
 
 `compress.autoFold` keeps a large-window model on a much smaller resident context.
-Before a request is forwarded, DCP measures the actual context tokens and, when the
-context is above `targetTokens + minGrowthTokens`, folds the oldest safe contiguous
-history into ordinary compression blocks. Nothing shells out and the model-visible
-compress tool is not called: the fold reuses the same internal range path, so block
-state, statistics, readback and release behavior stay identical.
+Each fold is prepared after a turn ends and only substituted when the next request
+is built, so no summarizer call sits on the request path. In the prepare step DCP
+measures the actual context tokens and, when the context is above
+`targetTokens + minGrowthTokens`, has the configured model summarize the oldest
+safe contiguous history. The folded blocks are created by the context hook from
+that prepared artifact, reusing the same internal range path as the manual
+compress tool, so block state, protection, statistics, readback and release
+behavior stay identical.
 
 ```jsonc
 {
@@ -115,6 +118,8 @@ state, statistics, readback and release behavior stay identical.
             // Keep roughly 100k resident context on a 1M-token model
             "targetTokens": 100000,
             "minGrowthTokens": 4096,
+            // Skip the fold unless the safe ranges can reclaim this much
+            "minFoldTokens": 20000,
             "keepRecentMessages": 3,
         },
         // Optional: let a dedicated model write the folded summaries
@@ -127,13 +132,25 @@ Safety rules:
 
 - Never runs in subagents, internal agent calls, denied or `ask` permission, manual
   mode, or when the target is not exceeded.
-- At most one fold pass per request, with hysteresis from `minGrowthTokens`.
+- At most one prepared fold per turn and one projection per prepared fold, with
+  hysteresis from `minGrowthTokens`.
+- A fold whose safe ranges reclaim less than `minFoldTokens` is skipped before the
+  summarizer runs, so a long turn cannot spend a model call per request on slivers.
 - The newest `keepRecentMessages` messages, the active turn and any pending or running
   tool calls are always retained, and ranges never overlap an active block.
-- With `compress.model` set, the configured model authors each folded summary. Without
-  it, DCP writes a clearly labelled mechanical digest instead of pretending a summary
-  was authored.
+- The request hook never calls a model: it substitutes a prepared artifact, and when
+  none applies it skips the fold and logs the reason. A prepared range whose boundaries
+  no longer map to the same messages is dropped instead of forced.
+- With `compress.model` set, the configured model authors each folded summary during
+  the prepare step. Without it, DCP writes a clearly labelled mechanical digest
+  instead of pretending a summary was authored.
 - Failures fail open: the original context is left untouched and a warning is logged.
+
+Each fold reports two chat notices, rendered through the same host message mechanism
+peer messages use: `自动压缩触发` when the prepare step starts spending a summarizer
+call, and `自动压缩: <short topic>` when the prepared fold is committed to the request.
+They are ordinary session messages, so the model sees them too; a failed notice is
+logged and never aborts the fold.
 
 Folded summaries render a concise visible title derived from the compression topic, for
 example `Title: Auto-fold: 412k -> 100k`, above the summary body. The
@@ -362,10 +379,11 @@ Each level overrides the previous, so project settings take priority over global
         // Preserve your messages during compression.
         // Warning: large copy-pasted prompts will never be compressed away
         "protectUserMessages": false,
-        // Automatic pre-request folding (OpenCode V2). Off by default.
-        // When enabled, DCP folds the oldest safe history into ordinary
-        // compression blocks before a request is forwarded, so a large-window
-        // model can keep a much smaller resident context.
+        // Automatic end-of-turn folding (OpenCode V2). Off by default.
+        // When enabled, DCP summarizes the oldest safe history after a turn
+        // ends and folds it into ordinary compression blocks when the next
+        // request is built, so a large-window model can keep a much smaller
+        // resident context without a model call on the request path.
         "autoFold": {
             "enabled": false,
             // Resident context budget in tokens. Folding only runs above

@@ -151,13 +151,13 @@
                 },
                 "autoFold": {
                     "type": "object",
-                    "description": "Automatic pre-request folding: reduce resident context before the request is forwarded, using ordinary compression blocks. Disabled by default.",
+                    "description": "Automatic end-of-turn folding: summarize the oldest safe history after a turn ends and project it into ordinary compression blocks when the next request is built, with no model call on the request path. Disabled by default.",
                     "additionalProperties": false,
                     "properties": {
                         "enabled": {
                             "type": "boolean",
                             "default": false,
-                            "description": "Enable automatic pre-request folding (OpenCode V2 context hook only)."
+                            "description": "Enable automatic end-of-turn folding (OpenCode V2: prepare after the turn, project in the context hook)."
                         },
                         "targetTokens": {
                             "type": "integer",
@@ -170,6 +170,12 @@
                             "minimum": 0,
                             "default": 4096,
                             "description": "Hysteresis above targetTokens before a fold may run, so small fluctuations cannot trigger repeated folds."
+                        },
+                        "minFoldTokens": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "Smallest reduction worth a summarizer call. When the safe ranges can only reclaim less than this, the fold is skipped and the context is left untouched."
                         },
                         "keepRecentMessages": {
                             "type": "integer",
@@ -303,6 +309,7 @@
                     "enabled": false,
                     "targetTokens": 100000,
                     "minGrowthTokens": 4096,
+                    "minFoldTokens": 0,
                     "keepRecentMessages": 3
                 },
                 "maxContextLimit": 100000,

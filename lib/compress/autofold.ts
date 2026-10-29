@@ -35,6 +35,7 @@ export type AutoFoldSkipReason =
     | "manual"
     | "below-target"
     | "no-safe-range"
+    | "below-floor"
     | "already-prepared"
     | "in-flight"
     | "no-artifact"
@@ -367,9 +368,13 @@ export async function prepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPre
         })
         const selectedTokens = runs.reduce((total, run) => total + run.tokens, 0)
         // A fold that cannot outweigh the smallest possible summary would grow the
-        // context instead of shrinking it, so leave the original context alone.
+        // context instead of shrinking it, and a fold below the configured floor is
+        // not worth the summarizer call it costs.
         if (runs.length === 0 || selectedTokens <= summaryBudget(0)) {
             return { prepared: false, reason: "no-safe-range", contextTokens }
+        }
+        if (selectedTokens < autoFold.minFoldTokens) {
+            return { prepared: false, reason: "below-floor", contextTokens }
         }
 
         const topic = `Auto-fold: ${formatTokens(contextTokens)} -> ${formatTokens(autoFold.targetTokens)}`

@@ -34,6 +34,8 @@ export interface AutoFoldConfig {
     enabled: boolean
     targetTokens: number
     minGrowthTokens: number
+    /** Smallest reduction worth a summarizer call. Zero keeps every safe range. */
+    minFoldTokens: number
     keepRecentMessages: number
 }
 
@@ -148,6 +150,7 @@ export const VALID_CONFIG_KEYS = new Set([
     "compress.autoFold.enabled",
     "compress.autoFold.targetTokens",
     "compress.autoFold.minGrowthTokens",
+    "compress.autoFold.minFoldTokens",
     "compress.autoFold.keepRecentMessages",
     "compress.mode",
     "compress.permission",
@@ -486,6 +489,16 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                             key: "compress.autoFold.minGrowthTokens",
                             expected: "non-negative integer tokens",
                             actual: `${JSON.stringify(autoFold.minGrowthTokens)}`,
+                        })
+                    }
+                    if (
+                        autoFold.minFoldTokens !== undefined &&
+                        (!Number.isSafeInteger(autoFold.minFoldTokens) || autoFold.minFoldTokens < 0)
+                    ) {
+                        errors.push({
+                            key: "compress.autoFold.minFoldTokens",
+                            expected: "non-negative integer tokens",
+                            actual: `${JSON.stringify(autoFold.minFoldTokens)}`,
                         })
                     }
                     if (
@@ -833,6 +846,7 @@ const defaultConfig: PluginConfig = {
             enabled: false,
             targetTokens: 100_000,
             minGrowthTokens: 4_096,
+            minFoldTokens: 0,
             keepRecentMessages: 3,
         },
         maxContextLimit: "500k/50%",
@@ -1005,6 +1019,7 @@ function mergeCompress(
                   targetTokens: override.autoFold.targetTokens ?? base.autoFold.targetTokens,
                   minGrowthTokens:
                       override.autoFold.minGrowthTokens ?? base.autoFold.minGrowthTokens,
+                  minFoldTokens: override.autoFold.minFoldTokens ?? base.autoFold.minFoldTokens,
                   keepRecentMessages:
                       override.autoFold.keepRecentMessages ?? base.autoFold.keepRecentMessages,
               }

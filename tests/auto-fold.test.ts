@@ -62,6 +62,7 @@ function buildConfig(overrides: Partial<PluginConfig["compress"]["autoFold"]> = 
                 enabled: true,
                 targetTokens: 1000,
                 minGrowthTokens: 100,
+                minFoldTokens: 0,
                 keepRecentMessages: 2,
                 ...overrides,
             },
@@ -366,8 +367,31 @@ test("auto-fold stays idle while the context is below target plus growth", async
     assert.equal(notices.notices.length, 0)
 })
 
-test("prepare authors the fold artifact without touching the request path", async () => {
-    const sessionID = `ses_autofold_prepare_${Date.now()}`
+test("skips a fold that cannot reclaim the minimum reduction", async () => {
+    const sessionID = `ses_autofold_floor_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const notices = buildNotices()
+    const counter = { calls: 0 }
+    const ctx = buildContext(sessionID, rawMessages, buildConfig({ minFoldTokens: 100_000 }), {
+        summarizer: buildSummarizer(counter),
+    })
+
+    const prepared = await prepareAutoFold({
+        ctx,
+        sessionID,
+        messages: rawMessages,
+        notify: notices.notify,
+    })
+
+    assert.equal(prepared.prepared, false)
+    assert.equal(prepared.reason, "below-floor")
+    assert.equal(ctx.state.preparedAutoFold, null)
+    // A fold that would barely dent the context must not spend a summarizer call.
+    assert.equal(counter.calls, 0)
+    assert.equal(notices.notices.length, 0)
+})
+
+test("prepare authors the fold artifact without touching the request path", async () => {    const sessionID = `ses_autofold_prepare_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
     const config = buildConfig()
     config.compress.model = "test/model"
