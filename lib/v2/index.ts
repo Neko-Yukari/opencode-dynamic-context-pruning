@@ -43,6 +43,7 @@ import { createFullHistoryReader } from "./full-history"
 import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
 import { createNotifier } from "./notify"
 import { foldPrepareTrigger } from "./fold-events"
+import { IDLE_HOOK, idleHook, registerIdlePrepare } from "./idle-hook"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
@@ -183,31 +184,44 @@ export async function setup(ctx: Plugin.Context) {
     const notify = createNotifier(ctx, logger)
 
     // Auto-fold prepare runs after the turn ends, never inside a request. The
-    // context hook below only projects what this prepared.
+    // context hook below only projects what this prepared. Two paths reach the
+    // same prepare: the host bus events (fallback) and, on OpenCode 2.2.1+, the
+    // experimental.idle session hook. Repeated triggers collapse in
+    // prepareAutoFold through the prepared-artifact anchor and its TTL.
     const foldAbort = new AbortController()
-    if (config.compress.autoFold?.enabled === true)
+    if (config.compress.autoFold?.enabled === true) {
+        const prepareFold = async (sessionID: string, trigger: string, background?: boolean) => {
+            try {
+                const { state, messages } = await load(sessionID)
+                // prepareAutoFold logs every attempt with this trigger.
+                await prepareAutoFold({
+                    ctx: { client, state, logger, config, prompts, summarizer },
+                    sessionID,
+                    messages,
+                    notify,
+                    trigger,
+                })
+            } catch (error) {
+                logger.warn("DCP auto-fold prepare skipped", {
+                    trigger,
+                    sessionID,
+                    ...(background === undefined ? {} : { background }),
+                    error: (error as Error)?.message ?? String(error),
+                })
+            }
+        }
+        await registerIdlePrepare({
+            hook: idleHook(ctx),
+            logger,
+            directory: ctx.location.directory,
+            prepare: (sessionID, event) => prepareFold(sessionID, IDLE_HOOK, event.background),
+        })
         void (async () => {
             try {
                 for await (const event of ctx.event.subscribe({ signal: foldAbort.signal })) {
                     const sessionID = foldPrepareTrigger(event, ctx.location.directory)
                     if (sessionID === undefined) continue
-                    try {
-                        const { state, messages } = await load(sessionID)
-                        // prepareAutoFold logs every attempt with this trigger.
-                        await prepareAutoFold({
-                            ctx: { client, state, logger, config, prompts, summarizer },
-                            sessionID,
-                            messages,
-                            notify,
-                            trigger: event.type,
-                        })
-                    } catch (error) {
-                        logger.warn("DCP auto-fold prepare skipped", {
-                            trigger: event.type,
-                            sessionID,
-                            error: (error as Error)?.message ?? String(error),
-                        })
-                    }
+                    await prepareFold(sessionID, event.type)
                 }
             } catch (error) {
                 if (!foldAbort.signal.aborted)
@@ -216,6 +230,7 @@ export async function setup(ctx: Plugin.Context) {
                     })
             }
         })()
+    }
 
     await ctx.model.transform((editor) => {
         limits.clear()

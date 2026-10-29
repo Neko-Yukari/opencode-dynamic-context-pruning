@@ -21,7 +21,8 @@ import {
     projectAutoFold,
     type AutoFoldNotice,
 } from "../lib/compress/autofold"
-import { foldPrepareTrigger } from "../lib/v2/fold-events"
+import { foldPrepareTrigger, type IdleHookEvent } from "../lib/v2/fold-events"
+import { IDLE_HOOK, registerIdlePrepare } from "../lib/v2/idle-hook"
 import { wrapCompressedSummary, COMPRESSED_BLOCK_HEADER } from "../lib/compress/state"
 import { getInvalidConfigKeys, validateConfigTypes } from "../lib/config"
 
@@ -972,6 +973,121 @@ test("session.idle starts a prepare and repeated terminal events prepare once", 
         undefined,
     )
     assert.equal(foldPrepareTrigger({ type: "session.idle", data: {} }, directory), undefined)
+})
+
+test("the experimental.idle hook prepares once with its own trigger and background", async () => {
+    const sessionID = `ses_autofold_idlehook_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const counter = { calls: 0 }
+    const notices = buildNotices()
+    const logs: string[] = []
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer(counter),
+        logs,
+    })
+    let idle: ((event: IdleHookEvent) => Promise<void> | void) | undefined
+    const registered: string[] = []
+    const ready = await registerIdlePrepare({
+        hook: async (name, callback) => {
+            registered.push(name)
+            idle = callback
+            return {}
+        },
+        logger: ctx.logger,
+        directory: "C:/Users/81004/opencode-dcp",
+        prepare: async (target, event) => {
+            assert.equal(event.background, true)
+            await prepareAutoFold({
+                ctx,
+                sessionID: target,
+                messages: rawMessages,
+                notify: notices.notify,
+                trigger: IDLE_HOOK,
+            })
+        },
+    })
+
+    assert.equal(ready, true)
+    assert.deepEqual(registered, ["experimental.idle"])
+    await idle!({ sessionID, background: true })
+
+    assert.equal(counter.calls, 1)
+    assert.match(logs[0]!, /^debug DCP experimental\.idle hook fired /)
+    assert.match(logs[0]!, /"background":true/)
+    const prepareLine = logs.find((line) => line.includes("DCP auto-fold prepare "))
+    assert.match(prepareLine!, /"trigger":"experimental\.idle"/)
+
+    // A payload that names another directory never prepares here.
+    await idle!({ sessionID, background: false, location: { directory: "D:\\other" } })
+    assert.equal(counter.calls, 1)
+    assert.ok(logs.some((line) => line.startsWith("debug DCP experimental.idle ignored")))
+})
+
+test("an idle hook and a terminal event for the same anchor prepare only once", async () => {
+    const sessionID = `ses_autofold_idleonce_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const counter = { calls: 0 }
+    const notices = buildNotices()
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer(counter),
+    })
+    let idle: ((event: IdleHookEvent) => Promise<void> | void) | undefined
+    await registerIdlePrepare({
+        hook: async (_name, callback) => {
+            idle = callback
+            return {}
+        },
+        logger: ctx.logger,
+        directory: "C:/Users/81004/opencode-dcp",
+        prepare: async (target) => {
+            await prepareAutoFold({
+                ctx,
+                sessionID: target,
+                messages: rawMessages,
+                notify: notices.notify,
+                trigger: IDLE_HOOK,
+            })
+        },
+    })
+
+    await idle!({ sessionID, background: false })
+    // The fallback event path still runs; it must find the prepared artifact.
+    const second = await prepareAutoFold({
+        ctx,
+        sessionID,
+        messages: rawMessages,
+        notify: notices.notify,
+        trigger: "session.execution.succeeded",
+    })
+
+    assert.equal(second.prepared, false)
+    assert.equal(second.reason, "already-prepared")
+    assert.equal(counter.calls, 1)
+    assert.equal(notices.start().length, 1)
+})
+
+test("an unknown idle hook kind only warns and keeps the event path available", async () => {
+    const logs: string[] = []
+    let prepared = 0
+    const ready = await registerIdlePrepare({
+        hook: async () => {
+            throw new Error("unknown session hook kind")
+        },
+        logger: buildLogger(logs),
+        directory: "C:/Users/81004/opencode-dcp",
+        prepare: async () => {
+            prepared++
+        },
+    })
+
+    assert.equal(ready, false)
+    assert.equal(prepared, 0)
+    assert.match(logs[0]!, /^warn DCP experimental\.idle hook not registered /)
+    assert.match(logs[0]!, /"error":"unknown session hook kind"/)
 })
 
 test("auto-fold keeps the newest messages and the active turn out of the artifact", async () => {

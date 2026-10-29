@@ -43,3 +43,28 @@ export function foldPrepareTrigger(
     if (!sameDirectory(event.location?.directory, directory)) return undefined
     return sessionID
 }
+
+/**
+ * Payload of the host's `experimental.idle` session hook. OpenCode 2.2.1 sends
+ * `{ sessionID, background }`; the optional directory fields cover a host that
+ * also carries the session's location, so a payload is only treated as local
+ * when it names no location or names this one.
+ */
+export interface IdleHookEvent {
+    sessionID: string
+    background?: boolean
+    location?: { readonly directory?: string }
+    directory?: string
+}
+
+/**
+ * The session an `experimental.idle` hook belongs to, or undefined when it
+ * addresses another directory. A payload without a location counts as this
+ * plugin's directory, matching the event-path default above.
+ */
+export function idleHookSession(event: IdleHookEvent, directory: string): string | undefined {
+    if (typeof event.sessionID !== "string") return undefined
+    const location = event.location?.directory ?? event.directory
+    if (!sameDirectory(location, directory)) return undefined
+    return event.sessionID
+}
