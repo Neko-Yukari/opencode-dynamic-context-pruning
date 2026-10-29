@@ -22,7 +22,7 @@ import type { SearchContext, ToolContext } from "./types"
  * compress path.
  *
  * Safety rules are unchanged: disabled by default, no subagents, no denied/ask
- * permission, no manual mode, only above `targetTokens + minGrowthTokens`, the
+ * permission, no manual mode, only above `triggerTokens` (default `targetTokens + 4k`), the
  * newest messages and the active turn always retained, ranges never overlap an
  * active block, and both halves fail open on error.
  */
@@ -30,6 +30,7 @@ import type { SearchContext, ToolContext } from "./types"
 export type AutoFoldSkipReason =
     | "disabled"
     | "invalid-target"
+    | "invalid-trigger"
     | "subagent"
     | "permission"
     | "manual"
@@ -92,6 +93,8 @@ const OVERVIEW_LIMIT = 240
 // A prepared fold is only useful for the request that follows its turn. Anything
 // older is abandoned instead of resurrecting an unrelated summary after a restart.
 const PREPARED_FOLD_TTL_MS = 30 * 60_000
+/** Gap above the target used when no explicit `triggerTokens` is configured. */
+const AUTO_FOLD_TRIGGER_SLACK = 4_096
 
 export interface AutoFoldNotice {
     sessionID: string
@@ -339,7 +342,8 @@ function mechanicalDigest(planSummaryBudget: number, source: string): string {
 /** Auto-fold thresholds after resolving the configured specs against the model window. */
 export interface ResolvedAutoFold {
     targetTokens: number
-    minGrowthTokens: number
+    /** Resident context size that starts a fold. */
+    triggerTokens: number
     minFoldTokens: number
     keepRecentMessages: number
 }
@@ -347,7 +351,7 @@ export interface ResolvedAutoFold {
 export interface AutoFoldResolution {
     autoFold?: ResolvedAutoFold
     /** Set when the configuration itself cannot start a fold. */
-    reason?: "disabled" | "invalid-target"
+    reason?: "disabled" | "invalid-target" | "invalid-trigger"
 }
 
 function needsModelWindow(value: unknown): boolean {
@@ -355,9 +359,9 @@ function needsModelWindow(value: unknown): boolean {
 }
 
 /**
- * Resolve the three size thresholds like `compress.maxContextLimit`: plain
- * tokens, a suffixed count ("100k"), a share of the model window ("10%"), or two
- * of those joined by "/" ("100k/10%") where the lower value wins. A percentage
+ * Resolve the size thresholds like `compress.maxContextLimit`: plain tokens, a
+ * suffixed count ("100k"), a share of the model window ("10%"), or two of those
+ * joined by "/" ("200k/20%") where the lower value wins. A percentage
  * is only meaningful against a known window, so with no window cached from the
  * host the fold is unavailable instead of guessing one; the debug line says why.
  */
@@ -377,7 +381,7 @@ export function resolveAutoFold(ctx: ToolContext): AutoFoldResolution {
     const window = ctx.state.modelContextLimit
     if (
         window === undefined &&
-        [autoFold.targetTokens, autoFold.minGrowthTokens, autoFold.minFoldTokens].some(
+        [autoFold.targetTokens, autoFold.triggerTokens, autoFold.minFoldTokens].some(
             needsModelWindow,
         )
     ) {
@@ -385,7 +389,7 @@ export function resolveAutoFold(ctx: ToolContext): AutoFoldResolution {
             "DCP auto-fold has percentage thresholds and no known model context window; fold unavailable",
             {
                 targetTokens: autoFold.targetTokens,
-                minGrowthTokens: autoFold.minGrowthTokens,
+                triggerTokens: autoFold.triggerTokens,
                 minFoldTokens: autoFold.minFoldTokens,
             },
         )
@@ -395,10 +399,26 @@ export function resolveAutoFold(ctx: ToolContext): AutoFoldResolution {
     const targetTokens = resolveContextLimit(autoFold.targetTokens, window)
     if (targetTokens === undefined || targetTokens <= 0) return { reason: "invalid-target" }
 
+    // Without an explicit trigger a fold starts just past the target: enough gap
+    // that a settled fold cannot immediately trigger again.
+    const triggerTokens =
+        autoFold.triggerTokens === undefined
+            ? targetTokens + AUTO_FOLD_TRIGGER_SLACK
+            : resolveContextLimit(autoFold.triggerTokens, window)
+    // A trigger at or below the target can never settle: the fold would land on
+    // the same size and start again on the next turn.
+    if (triggerTokens === undefined || triggerTokens <= targetTokens) {
+        ctx.logger.debug("DCP auto-fold trigger cannot start a fold", {
+            triggerTokens: autoFold.triggerTokens ?? triggerTokens,
+            targetTokens,
+        })
+        return { reason: "invalid-trigger" }
+    }
+
     return {
         autoFold: {
             targetTokens,
-            minGrowthTokens: resolveContextLimit(autoFold.minGrowthTokens, window) ?? 0,
+            triggerTokens,
             minFoldTokens: resolveContextLimit(autoFold.minFoldTokens, window) ?? 0,
             keepRecentMessages: autoFold.keepRecentMessages,
         },
@@ -465,8 +485,7 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         return { prepared: false, reason: blocker ?? "disabled", contextTokens }
     }
 
-    const trigger = autoFold.targetTokens + Math.max(0, autoFold.minGrowthTokens)
-    if (contextTokens <= trigger) {
+    if (contextTokens <= autoFold.triggerTokens) {
         return { prepared: false, reason: "below-target", contextTokens }
     }
 
@@ -639,8 +658,7 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
         return { folded: false, reason: blocker ?? "disabled", contextTokens }
     }
 
-    const trigger = autoFold.targetTokens + Math.max(0, autoFold.minGrowthTokens)
-    if (contextTokens <= trigger) {
+    if (contextTokens <= autoFold.triggerTokens) {
         return { folded: false, reason: "below-target", contextTokens }
     }
 

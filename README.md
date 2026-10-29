@@ -104,13 +104,13 @@ Released regions stay omitted, and old block references stop working after compa
 Each fold is prepared after a turn ends and only substituted when the next request
 is built, so no summarizer call sits on the request path. In the prepare step DCP
 measures the actual context tokens and, when the context is above
-`targetTokens + minGrowthTokens`, has the configured model summarize the oldest
+`triggerTokens`, has the configured model summarize the oldest
 safe contiguous history. The folded blocks are created by the context hook from
 that prepared artifact, reusing the same internal range path as the manual
 compress tool, so block state, protection, statistics, readback and release
 behavior stay identical.
 
-`targetTokens`, `minGrowthTokens` and `minFoldTokens` accept the same specs as
+`targetTokens`, `triggerTokens` and `minFoldTokens` accept the same specs as
 `compress.maxContextLimit`: plain tokens (`100000`), suffixed tokens (`100k`,
 `1m`), a percent of the model context window (`10%`), or two specs joined by `/`
 (`100k/10%`) where the lower resolved value wins. Percentages need the model
@@ -126,8 +126,8 @@ keeps a `100k/10%` target proportional when the session moves to a smaller model
             // Keep roughly 100k resident context, but never more than 10% of
             // the window: on a 200k model the target shrinks to 20k
             "targetTokens": "100k/10%",
-            // Hysteresis: the smaller of 20k tokens and 20% of the window
-            "minGrowthTokens": "20k/20%",
+            // Start folding at 200k, or 20% of the window when that is lower
+            "triggerTokens": "200k/20%",
             // Skip the fold unless the safe ranges can reclaim this much
             "minFoldTokens": 20000,
             "keepRecentMessages": 3,
@@ -138,15 +138,16 @@ keeps a `100k/10%` target proportional when the session moves to a smaller model
 }
 ```
 
-With that configuration the fold runs once the measured context passes
-`100000 + 20000 = 120000` tokens on a 1M-window model.
+With that configuration the fold starts once the measured context passes 200000
+tokens on a 1M-window model, and stops selecting history at 100000.
 
 Safety rules:
 
 - Never runs in subagents, internal agent calls, denied or `ask` permission, manual
   mode, or when the target is not exceeded.
-- At most one prepared fold per turn and one projection per prepared fold, with
-  hysteresis from `minGrowthTokens`.
+- At most one prepared fold per turn and one projection per prepared fold. A fold
+  that lands on the target cannot start again until the context grows back past
+  `triggerTokens`.
 - A fold whose safe ranges reclaim less than `minFoldTokens` is skipped before the
   summarizer runs, so a long turn cannot spend a model call per request on slivers.
 - The newest `keepRecentMessages` messages, the active turn and any pending or running
@@ -402,15 +403,14 @@ Each level overrides the previous, so project settings take priority over global
         // resident context without a model call on the request path.
         "autoFold": {
             "enabled": false,
-            // Resident context budget. Folding only runs above
-            // targetTokens + minGrowthTokens.
+            // Resident context budget: a fold stops here.
             // Accepts tokens (100000), suffixed tokens ("100k", "1m"), a
             // percent of the model window ("10%"), or two specs joined by
             // "/" ("100k/10%") where the lower value wins.
             "targetTokens": 100000,
-            // Hysteresis so small fluctuations cannot trigger repeated folds,
-            // in the same forms as targetTokens
-            "minGrowthTokens": 4096,
+            // Context size that starts a fold, in the same forms as
+            // targetTokens. Defaults to targetTokens + 4096.
+            "triggerTokens": 104096,
             // Newest messages always retained; the active turn is always kept
             "keepRecentMessages": 3,
         },

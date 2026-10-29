@@ -160,7 +160,7 @@
                             "description": "Enable automatic end-of-turn folding (OpenCode V2: prepare after the turn, project in the context hook)."
                         },
                         "targetTokens": {
-                            "description": "Resident context budget. Folding runs only while the measured context is above targetTokens + minGrowthTokens, and stops selecting history once the reduction reaches the target. Accepts tokens (100000), suffixed tokens (\"100k\", \"1m\"), a percent of the model context window (\"10%\"), or two specs joined by \"/\" (\"100k/10%\") where the lower resolved value wins. A percent needs a known model window; without one the fold stays off.",
+                            "description": "Resident context budget. A fold stops selecting history once the reduction reaches the target. Accepts tokens (100000), suffixed tokens (\"100k\", \"1m\"), a percent of the model context window (\"10%\"), or two specs joined by \"/\" (\"100k/10%\") where the lower resolved value wins. A percent needs a known model window; without one the fold stays off.",
                             "default": 100000,
                             "oneOf": [
                                 {
@@ -173,13 +173,12 @@
                                 }
                             ]
                         },
-                        "minGrowthTokens": {
-                            "description": "Hysteresis above targetTokens before a fold may run, so small fluctuations cannot trigger repeated folds. Accepts the same tokens, suffixed tokens, percent, or \"/\" joined specs as targetTokens, where the lower resolved value wins.",
-                            "default": 4096,
+                        "triggerTokens": {
+                            "description": "Measured context size that starts a fold, independent of targetTokens. Defaults to targetTokens + 4096. Must resolve above targetTokens; at or below it the fold stays off, because it would reclaim nothing and start again on the next turn. Accepts the same tokens, suffixed tokens, percent, or \"/\" joined specs as targetTokens, where the lower resolved value wins.",
                             "oneOf": [
                                 {
                                     "type": "number",
-                                    "minimum": 0
+                                    "minimum": 1
                                 },
                                 {
                                     "type": "string",
@@ -332,7 +331,7 @@
                 "autoFold": {
                     "enabled": false,
                     "targetTokens": 100000,
-                    "minGrowthTokens": 4096,
+                    "triggerTokens": 104096,
                     "minFoldTokens": 0,
                     "keepRecentMessages": 3
                 },

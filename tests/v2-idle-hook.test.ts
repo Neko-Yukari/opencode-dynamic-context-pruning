@@ -23,7 +23,6 @@ test("setup warns instead of failing when the host rejects experimental.idle", a
                 autoFold: {
                     enabled: true,
                     targetTokens: 100_000,
-                    minGrowthTokens: 4_096,
                     minFoldTokens: 0,
                     keepRecentMessages: 3,
                 },

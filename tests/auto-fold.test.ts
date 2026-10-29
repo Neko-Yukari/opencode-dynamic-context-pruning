@@ -67,7 +67,7 @@ function buildConfig(overrides: Partial<PluginConfig["compress"]["autoFold"]> = 
             autoFold: {
                 enabled: true,
                 targetTokens: 1000,
-                minGrowthTokens: 100,
+                triggerTokens: 1_100,
                 minFoldTokens: 0,
                 keepRecentMessages: 2,
                 ...overrides,
@@ -279,7 +279,7 @@ test("autoFold config keys and values are validated", () => {
                 autoFold: {
                     enabled: true,
                     targetTokens: 100000,
-                    minGrowthTokens: 4096,
+                    triggerTokens: 104_096,
                     keepRecentMessages: 3,
                 },
             },
@@ -292,7 +292,7 @@ test("autoFold config keys and values are validated", () => {
             autoFold: {
                 enabled: true,
                 targetTokens: 100000,
-                minGrowthTokens: 4096,
+                triggerTokens: 104_096,
                 keepRecentMessages: 3,
             },
         },
@@ -306,7 +306,7 @@ test("autoFold config keys and values are validated", () => {
                 autoFold: {
                     enabled: true,
                     targetTokens: "100k/10%",
-                    minGrowthTokens: "20k/20%",
+                    triggerTokens: "200k/20%",
                     minFoldTokens: "100k",
                     keepRecentMessages: 3,
                 },
@@ -334,8 +334,8 @@ test("autoFold config keys and values are validated", () => {
     )
     assert.ok(
         keys({
-            compress: { autoFold: { enabled: true, targetTokens: 1, minGrowthTokens: -1 } },
-        }).includes("compress.autoFold.minGrowthTokens"),
+            compress: { autoFold: { enabled: true, targetTokens: 1, triggerTokens: -1 } },
+        }).includes("compress.autoFold.triggerTokens"),
     )
     assert.ok(
         keys({
@@ -363,34 +363,56 @@ test("auto-fold thresholds resolve absolute and percentage specs against the win
         return resolveAutoFold(ctx)
     }
 
-    // "100k/10%": 100k is smaller than 10% of a 1M window.
+    // "100k/10%": 100k is smaller than 10% of a 1M window. Without an
+    // explicit trigger the older target + growth model still decides when to fold.
     assert.deepEqual(
-        resolve({ targetTokens: "100k/10%", minGrowthTokens: "20k/20%" }, 1_048_576)
+        resolve({ targetTokens: "100k/10%", triggerTokens: "200k/20%" }, 1_048_576)
             .autoFold,
         {
             targetTokens: 100_000,
-            minGrowthTokens: 20_000,
+            triggerTokens: 200_000,
             minFoldTokens: 0,
             keepRecentMessages: 2,
         },
     )
 
-    // Same spec on a 200k window: 10% is smaller than 100k.
-    assert.equal(
-        resolve({ targetTokens: "100k/10%" }, 200_000).autoFold?.targetTokens,
-        20_000,
-    )
+    // Same specs on a 200k window: both percentages win, so the target drops to
+    // 10% and the trigger to 20% of the window.
+    const narrow = resolve(
+        { targetTokens: "100k/10%", triggerTokens: "200k/20%" },
+        200_000,
+    ).autoFold
+    assert.deepEqual([narrow?.targetTokens, narrow?.triggerTokens], [20_000, 40_000])
 
     // Plain numbers keep their literal meaning and need no window.
     assert.deepEqual(
-        resolve({ targetTokens: 1_000, minGrowthTokens: 100, minFoldTokens: 20_000 }).autoFold,
+        resolve({ targetTokens: 1_000, triggerTokens: 1_100, minFoldTokens: 20_000 }).autoFold,
         {
             targetTokens: 1_000,
-            minGrowthTokens: 100,
+            triggerTokens: 1_100,
             minFoldTokens: 20_000,
             keepRecentMessages: 2,
         },
     )
+
+    // An explicit trigger wins over target + growth: "200k/20%" is
+    // 200k on a 1M window, because the lower of 200k and 20% wins.
+    assert.equal(
+        resolve({ targetTokens: "100k/10%", triggerTokens: "200k/20%" }, 1_048_576)
+            .autoFold?.triggerTokens,
+        200_000,
+    )
+
+    // 20% of a 500k window is smaller than 200k, so the trigger follows the window down.
+    assert.equal(
+        resolve({ targetTokens: "100k/10%", triggerTokens: "200k/20%" }, 500_000)
+            .autoFold?.triggerTokens,
+        100_000,
+    )
+
+    // A trigger that has to drop to the target's own size would fold forever.
+    const noRoom = resolve({ targetTokens: 100_000, triggerTokens: "200k/20%" }, 400_000)
+    assert.deepEqual([noRoom.autoFold, noRoom.reason], [undefined, "invalid-trigger"])
 
     // Nothing to resolve a percentage against: auto-fold is unavailable, not guessed.
     const unknownWindow = resolve({ targetTokens: "100k/10%" })
@@ -439,12 +461,12 @@ test("percentage thresholds move the trigger line with the model window", async 
     const window = 1_048_576
     const config = buildConfig({
         targetTokens: "100k/10%",
-        minGrowthTokens: "20k/20%",
+        triggerTokens: "200k/20%",
     })
     config.compress.model = "test/model"
 
     const belowID = `ses_autofold_window_below_${Date.now()}`
-    const belowMessages = buildHistory(belowID, fourTurns(), 119_989)
+    const belowMessages = buildHistory(belowID, fourTurns(), 199_989)
     const belowState = createSessionState()
     belowState.modelContextLimit = window
     const belowCtx = buildContext(belowID, belowMessages, config, { state: belowState })
@@ -454,14 +476,14 @@ test("percentage thresholds move the trigger line with the model window", async 
         sessionID: belowID,
         messages: belowMessages,
     })
-    // 100k target + 20k growth = 120k trigger.
-    assert.equal(skipped.contextTokens, 119_999)
+    // 200k is the lower of 200k and 20% of the 1M window.
+    assert.equal(skipped.contextTokens, 199_999)
     assert.equal(skipped.prepared, false)
     assert.equal(skipped.reason, "below-target")
     assert.equal(belowCtx.state.preparedAutoFold, null)
 
     const aboveID = `ses_autofold_window_above_${Date.now()}`
-    const aboveMessages = buildHistory(aboveID, fourTurns(), 119_991)
+    const aboveMessages = buildHistory(aboveID, fourTurns(), 199_991)
     const aboveState = createSessionState()
     aboveState.modelContextLimit = window
     const counter = { calls: 0 }
@@ -475,7 +497,7 @@ test("percentage thresholds move the trigger line with the model window", async 
         sessionID: aboveID,
         messages: aboveMessages,
     })
-    assert.equal(prepared.contextTokens, 120_001)
+    assert.equal(prepared.contextTokens, 200_001)
     assert.equal(prepared.prepared, true)
     assert.equal(counter.calls, 1)
     assert.equal(aboveCtx.state.preparedAutoFold?.targetTokens, 100_000)
@@ -509,7 +531,7 @@ test("auto-fold stays idle while the context is below target plus growth", async
     const ctx = buildContext(
         sessionID,
         rawMessages,
-        buildConfig({ targetTokens: 100_000, minGrowthTokens: 4096 }),
+        buildConfig({ targetTokens: 100_000, triggerTokens: 104_096 }),
     )
 
     const prepared = await prepareAutoFold({
@@ -525,6 +547,41 @@ test("auto-fold stays idle while the context is below target plus growth", async
     assert.equal(ctx.state.preparedAutoFold, null)
     // A request that is merely over budget never announces a fold.
     assert.equal(notices.notices.length, 0)
+})
+
+test("an explicit trigger starts the fold regardless of the growth that was configured", async () => {
+    const sessionID = `ses_autofold_trigger_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const run = async (triggerTokens: number) => {
+        const config = buildConfig({ targetTokens: 1_000, triggerTokens })
+        config.compress.model = "test/model"
+        const counter = { calls: 0 }
+        const notices = buildNotices()
+        const ctx = buildContext(sessionID, rawMessages, config, {
+            summarizer: buildSummarizer(counter),
+        })
+        const prepared = await prepareAutoFold({
+            ctx,
+            sessionID,
+            messages: rawMessages,
+            notify: notices.notify,
+        })
+        return { prepared, notices, calls: counter.calls }
+    }
+
+    // 5010 tokens is over a 2000 trigger even though it is nowhere near the 100k
+    // growth the older model would have required.
+    const folded = await run(2_000)
+    assert.equal(folded.prepared.prepared, true)
+    assert.equal(folded.calls, 1)
+    assert.equal(folded.notices.start().length, 1)
+
+    // The same history stays idle when the trigger is above it.
+    const skipped = await run(6_000)
+    assert.equal(skipped.prepared.prepared, false)
+    assert.equal(skipped.prepared.reason, "below-target")
+    assert.equal(skipped.calls, 0)
+    assert.equal(skipped.notices.notices.length, 0)
 })
 
 test("skips a fold that cannot reclaim the minimum reduction", async () => {
@@ -1025,7 +1082,7 @@ test("prepare logs every attempt with its trigger and outcome", async () => {
     const below = buildContext(
         sessionID,
         rawMessages,
-        buildConfig({ targetTokens: 100_000, minGrowthTokens: 4096 }),
+        buildConfig({ targetTokens: 100_000, triggerTokens: 104_096 }),
         { logs: belowLogs },
     )
     await prepareAutoFold({

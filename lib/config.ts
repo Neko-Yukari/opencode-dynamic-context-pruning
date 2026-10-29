@@ -34,8 +34,11 @@ export interface AutoFoldConfig {
     enabled: boolean
     /** Resident context budget; resolved like `maxContextLimit`. */
     targetTokens: ContextLimitValue
-    /** Hysteresis above the target; resolved like `maxContextLimit`. */
-    minGrowthTokens: ContextLimitValue
+    /**
+     * Context size that starts a fold; resolved like `maxContextLimit`.
+     * Defaults to `targetTokens + 4096`.
+     */
+    triggerTokens?: ContextLimitValue
     /** Smallest reduction worth a summarizer call. Zero keeps every safe range. */
     minFoldTokens: ContextLimitValue
     keepRecentMessages: number
@@ -151,7 +154,7 @@ export const VALID_CONFIG_KEYS = new Set([
     "compress.autoFold",
     "compress.autoFold.enabled",
     "compress.autoFold.targetTokens",
-    "compress.autoFold.minGrowthTokens",
+    "compress.autoFold.triggerTokens",
     "compress.autoFold.minFoldTokens",
     "compress.autoFold.keepRecentMessages",
     "compress.mode",
@@ -495,11 +498,11 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                             1,
                         )
                     }
-                    if (autoFold.minGrowthTokens !== undefined) {
+                    if (autoFold.triggerTokens !== undefined) {
                         validateAutoFoldThreshold(
-                            "compress.autoFold.minGrowthTokens",
-                            autoFold.minGrowthTokens,
-                            0,
+                            "compress.autoFold.triggerTokens",
+                            autoFold.triggerTokens,
+                            1,
                         )
                     }
                     if (autoFold.minFoldTokens !== undefined) {
@@ -854,7 +857,7 @@ const defaultConfig: PluginConfig = {
         autoFold: {
             enabled: false,
             targetTokens: 100_000,
-            minGrowthTokens: 4_096,
+            triggerTokens: undefined,
             minFoldTokens: 0,
             keepRecentMessages: 3,
         },
@@ -1026,8 +1029,8 @@ function mergeCompress(
             ? {
                   enabled: override.autoFold.enabled ?? base.autoFold.enabled,
                   targetTokens: override.autoFold.targetTokens ?? base.autoFold.targetTokens,
-                  minGrowthTokens:
-                      override.autoFold.minGrowthTokens ?? base.autoFold.minGrowthTokens,
+                  triggerTokens:
+                      override.autoFold.triggerTokens ?? base.autoFold.triggerTokens,
                   minFoldTokens: override.autoFold.minFoldTokens ?? base.autoFold.minFoldTokens,
                   keepRecentMessages:
                       override.autoFold.keepRecentMessages ?? base.autoFold.keepRecentMessages,
