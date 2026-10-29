@@ -146,11 +146,14 @@ Safety rules:
   instead of pretending a summary was authored.
 - Failures fail open: the original context is left untouched and a warning is logged.
 
-Each fold reports two chat notices, rendered through the same host message mechanism
-peer messages use: `自动压缩触发` when the prepare step starts spending a summarizer
-call, and `自动压缩: <short topic>` when the prepared fold is committed to the request.
-They are ordinary session messages, so the model sees them too; a failed notice is
-logged and never aborts the fold.
+Each fold reports its progress with chat notices, rendered through the same host message
+mechanism peer messages use. `触发自动压缩` marks the prepare step that starts spending a
+summarizer call, and `自动压缩已应用：<before> → <after>，折叠 <n> 条消息（<m> 段）—— <overview>`
+reports the committed fold, where the overview is the opening sentence of each substituted
+summary. A fold that announced its start but failed closes with
+`自动压缩未完成：<short reason>`. They are ordinary session messages, so the model sees them
+too; a notice that fails to send is logged and never aborts the fold. Every prepare attempt
+also leaves one log line, so a fold that never ran is still explainable after the fact.
 
 Folded summaries render a concise visible title derived from the compression topic, for
 example `Title: Auto-fold: 412k -> 100k`, above the summary body. The
@@ -297,7 +300,7 @@ Each level overrides the previous, so project settings take priority over global
     // Automatically update npm-installed DCP when a newer npm latest is available.
     // Version-locked plugin specs are not updated.
     "autoUpdate": true,
-    // Enable debug logging to ~/.config/opencode/logs/dcp/
+    // Enable verbose debug logging to ~/.config/opencode/logs/dcp/ (info logs are always written)
     "debug": false,
     // Notification display: "off", "minimal", or "detailed"
     "pruneNotification": "detailed",

@@ -42,28 +42,16 @@ import { createReleaseTool } from "../release"
 import { createFullHistoryReader } from "./full-history"
 import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
 import { createNotifier } from "./notify"
+import { foldPrepareTrigger } from "./fold-events"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
-// That is exactly why the auto-fold notices use synthetic() instead: the user
-// asked for chat-visible notices shaped like peer messages, and peer messages
-// reach the model the same way.
+// That is exactly why the auto-fold completion notice uses synthetic() instead:
+// the user asked for a chat-visible notice shaped like a peer message, and peer
+// messages reach the model the same way. Text on that path must stay a
+// statement of what happened, never an instruction the model could act on.
 export async function report(logger: Logger, text: string, sessionID?: string) {
     logger.debug("V2 report (display pending)", { sessionID, text })
-}
-
-// A finished turn is the only safe moment to spend a summarizer call.
-const FOLD_PREPARE_EVENTS = new Set([
-    "session.execution.succeeded",
-    "session.execution.failed",
-    "session.execution.interrupted",
-])
-
-function sameDirectory(left: string | undefined, right: string): boolean {
-    if (left === undefined) return true
-    const normalize = (value: string) =>
-        value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
-    return normalize(left) === normalize(right)
 }
 
 export async function setup(ctx: Plugin.Context) {
@@ -201,22 +189,21 @@ export async function setup(ctx: Plugin.Context) {
         void (async () => {
             try {
                 for await (const event of ctx.event.subscribe({ signal: foldAbort.signal })) {
-                    if (!FOLD_PREPARE_EVENTS.has(event.type)) continue
-                    const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
-                    if (typeof sessionID !== "string") continue
-                    const { location } = event as { location?: { directory?: string } }
-                    if (!sameDirectory(location?.directory, ctx.location.directory)) continue
+                    const sessionID = foldPrepareTrigger(event, ctx.location.directory)
+                    if (sessionID === undefined) continue
                     try {
                         const { state, messages } = await load(sessionID)
-                        const prepared = await prepareAutoFold({
+                        // prepareAutoFold logs every attempt with this trigger.
+                        await prepareAutoFold({
                             ctx: { client, state, logger, config, prompts, summarizer },
                             sessionID,
                             messages,
                             notify,
+                            trigger: event.type,
                         })
-                        logger.debug("DCP auto-fold prepare pass", { sessionID, ...prepared })
                     } catch (error) {
                         logger.warn("DCP auto-fold prepare skipped", {
+                            trigger: event.type,
                             sessionID,
                             error: (error as Error)?.message ?? String(error),
                         })

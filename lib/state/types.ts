@@ -143,4 +143,12 @@ export interface SessionState {
     systemPromptTokens: number | undefined
     /** Summarized fold waiting for the next request hook; consumed at most once. */
     preparedAutoFold: PreparedAutoFold | null
+    /**
+     * Real user message of the turn whose auto-fold start was already announced
+     * in chat. The announcement is per anchor, not per attempt: a summary that
+     * fails leaves no artifact, so the next terminal event re-enters prepare and
+     * must not repeat the start notice. A newer user message changes the anchor
+     * and naturally retires the marker.
+     */
+    autoFoldAnnouncedFor: string | null
 }

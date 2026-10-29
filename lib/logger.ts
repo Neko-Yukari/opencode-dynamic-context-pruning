@@ -68,7 +68,10 @@ export class Logger {
     }
 
     private async write(level: string, component: string, message: string, data?: any) {
-        if (!this.enabled) return
+        // `debug` is the only channel gated by config.debug. Operational
+        // outcomes (a fold skipped, a prepare failed, a state change) must stay
+        // readable in production, or a silent session cannot be diagnosed at all.
+        if (level === "DEBUG" && !this.enabled) return
 
         try {
             await this.ensureLogDir()

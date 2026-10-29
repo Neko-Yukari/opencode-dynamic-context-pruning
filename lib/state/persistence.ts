@@ -53,6 +53,8 @@ export interface PersistedSessionState {
     lastCompaction?: number
     /** Summarized auto-fold waiting for the next request after a restart. */
     autoFold?: PreparedAutoFold | null
+    /** Anchor user message whose fold start was already announced in chat. */
+    autoFoldAnnouncedFor?: string | null
 }
 
 const STORAGE_DIR = join(
@@ -116,6 +118,7 @@ export async function saveSessionState(
         messageIds: serializeMessageIdState(sessionState),
         lastCompaction: sessionState.lastCompaction,
         autoFold: sessionState.preparedAutoFold ?? null,
+        autoFoldAnnouncedFor: sessionState.autoFoldAnnouncedFor ?? null,
         lastUpdated: new Date().toISOString(),
     }
     await writePersistedSessionState(sessionState.sessionId, state, logger)
