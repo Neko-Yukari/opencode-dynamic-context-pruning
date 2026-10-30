@@ -143,8 +143,8 @@ tokens on a 1M-window model, and stops selecting history at 100000.
 
 Safety rules:
 
-- Never runs in subagents, internal agent calls, denied or `ask` permission, manual
-  mode, or when the target is not exceeded.
+- Never runs in subagents unless `experimental.allowSubAgents` is true; also skipped for
+  denied or `ask` permission, manual mode, or when the target is not exceeded.
 - At most one prepared fold per turn and one projection per prepared fold. A fold
   that lands on the target cannot start again until the context grows back past
   `triggerTokens`.
@@ -161,12 +161,13 @@ Safety rules:
 - Failures fail open: the original context is left untouched and a warning is logged.
 
 A committed fold reports itself once, as a statement prepended to the next real user
-message: `自动压缩已应用：<before> → <after>，折叠 <n> 条消息（<m> 段）—— <overview>`, where
-the overview is the opening sentence of each substituted summary. It is part of that
-message's own submission, so there is no separate notice row and no model step of its own.
-A failed preparation leaves no chat statement, only a diagnostic log line; a prompt that
-fails before admission keeps the statement pending for the retry. Every prepare attempt
-also leaves one log line, so a fold that never ran is still explainable after the fact.
+message: `自动压缩已应用：<topic>｜<before> → <after>，折叠 <n> 条消息（<m> 段）`, where the
+topic is the first meaningful line of the substituted summary with host/path metadata
+stripped. It is part of that message's own submission, so there is no separate notice row
+and no model step of its own. A failed preparation leaves no chat statement, only a
+diagnostic log line; a prompt that fails before admission keeps the statement pending for
+the retry. Every prepare attempt also leaves one log line, so a fold that never ran is
+still explainable after the fact.
 
 Folded summaries render a concise visible title derived from the compression topic, for
 example `Title: Auto-fold: 412k -> 100k`, above the summary body. The

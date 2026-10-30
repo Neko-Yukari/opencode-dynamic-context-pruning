@@ -14,7 +14,6 @@ import type { Logger } from "../lib/logger"
 import {
     AUTO_FOLD_DONE_NOTICE,
     AUTO_FOLD_NOTICE_PREFIX,
-    autoFoldOverview,
     autoFoldTopic,
     formatAutoFoldEndDescription,
     formatAutoFoldEndNotice,
@@ -698,7 +697,7 @@ test("the hook projects a prepared artifact with zero summarizer calls", async (
     const detail = notice.text.slice(AUTO_FOLD_NOTICE_PREFIX.length)
     // The end notice reports the scale, what was folded, and the subject of the
     // substituted summary.
-    assert.match(detail, /^\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）—— Folded findings retained$/)
+    assert.match(detail, /^Folded findings retained｜\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）$/)
     // No host message is admitted from the request path; the prompt hook flushes it.
     assert.equal(notices.notices.length, 0)
 })
@@ -722,7 +721,7 @@ test("a committed fold holds one completion notice, with no start notice", async
     assert.equal(notice.description, "自动压缩完成：Folded findings retained")
     assert.match(
         notice.text,
-        /^自动压缩已应用：\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）—— Folded findings retained$/,
+        /^自动压缩已应用：Folded findings retained｜\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）$/,
     )
     assert.deepEqual(notice.metadata, { source: "dcp.autofold", event: "end" })
 })
@@ -752,35 +751,36 @@ test("a failed fold leaves no notice and only logs", async () => {
     assert.ok(logs.some((line) => line.startsWith("warn DCP auto-fold prepare failed")))
 })
 
-test("the end notice overview is the opening sentence of each substituted summary", () => {
-    // One sentence per range, cut at the first terminator.
+test("the completion topic skips host metadata and keeps version decimals intact", () => {
+    // The supplied real-world shape: a host heading followed by the actual subject.
     assert.equal(
-        autoFoldOverview([
-            { body: "Release pipeline reworked. Details follow." },
-            { body: "Tests were split.\nMore text" },
+        autoFoldTopic([
+            {
+                body: "Auto-fold (DCP plugin on OpenCode host 2.2.1)\n\n通知时机调整：只在用户输入时附注。",
+            },
         ]),
-        "Release pipeline reworked / Tests were split",
+        "通知时机调整",
     )
-    assert.equal(autoFoldOverview([{ body: "第一段概述。第二句不算。" }]), "第一段概述")
-    // A range excerpt never exceeds 120 characters.
-    const longRange = autoFoldOverview([{ body: "x".repeat(400) }])
-    assert.equal(longRange.length, 120)
-    assert.equal(longRange.endsWith("…"), false)
-    // The combined overview never exceeds 240 characters and says it was cut.
-    const longOverview = autoFoldOverview([
-        { body: "a".repeat(400) },
-        { body: "b".repeat(400) },
-        { body: "c".repeat(400) },
-    ])
-    assert.equal(longOverview.length, 241)
-    assert.ok(longOverview.endsWith("…"))
-    // An empty summary contributes nothing at all.
-    assert.equal(autoFoldOverview([{ body: "   \n " }]), "")
-    assert.equal(autoFoldOverview([{ body: "" }]), "")
+    // A version is not a sentence stop.
+    assert.equal(autoFoldTopic([{ body: "Bumped to 2.2.1. Then more." }]), "Bumped to 2.2.1")
+    assert.equal(autoFoldTopic([{ body: "Fixed decimal 3.5 handling" }]), "Fixed decimal 3.5 handling")
+    // A path-only metadata line is skipped, not rendered.
+    assert.equal(
+        autoFoldTopic([{ body: "D:\\RimWorld\\save\\game.rws\n地图加载修复" }]),
+        "地图加载修复",
+    )
+    // Paths inside a topic are stripped.
+    const pathTopic = autoFoldTopic([{ body: "修复 C:\\Users\\81004\\RimWorld\\save 的加载" }])
+    assert.equal(pathTopic.includes("C:\\"), false)
+    assert.ok(pathTopic.startsWith("修复"))
+    // Markdown heading and list markers do not leak into the topic.
+    assert.equal(autoFoldTopic([{ body: "## 通知时机调整\n正文" }]), "通知时机调整")
+    assert.equal(autoFoldTopic([{ body: "   \n " }]), "")
+    assert.equal(autoFoldTopic([]), "")
 })
 
-test("the end notice renders scale plus the overview of what replaced the history", () => {
-    // The exact string a user sees in the TUI for a two-range fold.
+test("the end notice renders the topic before the scale, with no overview tail", () => {
+    // The exact string a user sees for a two-range fold.
     assert.equal(
         formatAutoFoldEndNotice({
             beforeTokens: 177_400,
@@ -792,9 +792,24 @@ test("the end notice renders scale plus the overview of what replaced the histor
                 { body: "Tests were split by suite.\nFurther notes" },
             ],
         }),
-        "自动压缩已应用：177k → 153k，折叠 44 条消息（2 段）—— Release pipeline reworked to build once / Tests were split by suite",
+        "自动压缩已应用：Release pipeline reworked to build once｜177k → 153k，折叠 44 条消息（2 段）",
     )
-    // No summary body, no dangling dash.
+    // The supplied example: metadata heading + Chinese topic.
+    assert.equal(
+        formatAutoFoldEndNotice({
+            beforeTokens: 114_000,
+            afterTokens: 91_000,
+            compressedMessages: 21,
+            segments: 1,
+            ranges: [
+                {
+                    body: "Auto-fold (DCP plugin on OpenCode host 2.2.1)\n\n通知时机调整：只在用户输入时附注。",
+                },
+            ],
+        }),
+        "自动压缩已应用：通知时机调整｜114k → 91k，折叠 21 条消息（1 段）",
+    )
+    // No usable topic: no dangling separator.
     assert.equal(
         formatAutoFoldEndNotice({
             beforeTokens: 191_000,
@@ -827,7 +842,7 @@ test("the completion caption names the folded subject within a title budget", ()
     assert.equal(autoFoldTopic([]), "")
 })
 
-test("the end notice omits the overview when the substituted summary is empty", async () => {
+test("the end statement omits the topic when the substituted summary is empty", async () => {
     const sessionID = `ses_autofold_emptyoverview_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
     const config = buildConfig()
@@ -851,7 +866,7 @@ test("the end notice omits the overview when the substituted summary is empty", 
     assert.equal(folded.folded, true)
     const notice = ctx.state.pendingAutoFoldNotice!
     assert.ok(notice.text.startsWith("自动压缩已应用："))
-    assert.equal(notice.text.includes("—— "), false)
+    assert.equal(notice.text.includes("｜"), false)
     assert.match(
         notice.text.slice(AUTO_FOLD_NOTICE_PREFIX.length),
         /^\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）$/,
@@ -1493,11 +1508,35 @@ test("prepare fails open and leaves the original context untouched", async () =>
     assert.deepEqual(rawMessages, snapshot)
 })
 
-test("auto-fold never runs for subagents, denied permission or manual mode", async () => {
+test("auto-fold runs in subagents only when allowSubAgents is enabled", async () => {
     const sessionID = `ses_autofold_blockers_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
 
-    const subagent = buildContext(sessionID, rawMessages, buildConfig())
+    // The existing flag decides the subagent gate for both prepare and commit.
+    const allowedConfig = buildConfig()
+    allowedConfig.compress.model = "test/model"
+    const allowed = buildContext(sessionID, rawMessages, allowedConfig, {
+        summarizer: buildSummarizer({ calls: 0 }),
+    })
+    allowed.state.isSubAgent = true
+    const allowedPrepared = await prepareAutoFold({
+        ctx: allowed,
+        sessionID,
+        messages: rawMessages,
+    })
+    assert.equal(allowedPrepared.prepared, true)
+    const allowedFolded = await projectAutoFold({
+        ctx: allowed,
+        sessionID,
+        messages: rawMessages,
+    })
+    assert.equal(allowedFolded.folded, true)
+    assert.equal(allowed.state.prune.messages.blocksById.size, 1)
+    assert.ok(allowed.state.pendingAutoFoldNotice)
+
+    const blockedConfig = buildConfig()
+    blockedConfig.experimental.allowSubAgents = false
+    const subagent = buildContext(sessionID, rawMessages, blockedConfig)
     subagent.state.isSubAgent = true
     const subagentPrepared = await prepareAutoFold({
         ctx: subagent,
@@ -1508,6 +1547,10 @@ test("auto-fold never runs for subagents, denied permission or manual mode", asy
     assert.equal(subagentPrepared.reason, "subagent")
     assert.equal(subagent.state.preparedAutoFold, null)
     assert.equal(subagent.state.prune.messages.blocksById.size, 0)
+    assert.equal(
+        (await projectAutoFold({ ctx: subagent, sessionID, messages: rawMessages })).reason,
+        "subagent",
+    )
 
     const denied = buildContext(sessionID, rawMessages, buildConfig())
     denied.state.compressPermission = "deny"

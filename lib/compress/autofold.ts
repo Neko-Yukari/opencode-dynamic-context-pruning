@@ -88,11 +88,7 @@ export const AUTO_FOLD_NOTICE_LABEL = "自动压缩"
 export const AUTO_FOLD_DONE_NOTICE = `${AUTO_FOLD_NOTICE_LABEL}完成`
 export const AUTO_FOLD_NOTICE_PREFIX = "自动压缩已应用："
 const AUTO_FOLD_NOTICE_SOURCE = "dcp.autofold"
-/** Longest single-range excerpt in an end notice. */
-const OVERVIEW_RANGE_LIMIT = 120
-/** Longest combined overview in an end notice. */
-const OVERVIEW_LIMIT = 240
-/** Longest content title in the end caption. */
+/** Longest content title in the completion statement. */
 const AUTO_FOLD_TOPIC_LIMIT = 40
 // A prepared fold is only useful for the request that follows its turn. Anything
 // older is abandoned instead of resurrecting an unrelated summary after a restart.
@@ -125,43 +121,76 @@ function formatTokens(tokens: number): string {
     return `${tokens}`
 }
 
-/** First sentence of one folded summary, at most OVERVIEW_RANGE_LIMIT chars. */
-function summaryExcerpt(body: string): string {
-    const text = body.replace(/\r\n/g, "\n").trim()
-    if (text.length === 0) return ""
-    let end = text.length
-    for (const marker of ["。", ".", "\n"]) {
-        const index = text.indexOf(marker)
-        if (index >= 0 && index < end) end = index
-    }
-    return text.slice(0, Math.min(end, OVERVIEW_RANGE_LIMIT)).trim()
+/** Remove host, path and URL metadata from a candidate topic. */
+function stripTopicMetadata(value: string): string {
+    return value
+        .replace(/https?:\/\/[^\s，。；、)）]+/gi, " ")
+        .replace(/\([^()]*\b(?:dcp|opencode|plugin|host)\b[^()]*\)/gi, " ")
+        .replace(/\bdcp\s+plugin\b(?:\s+on\s+[^，。；,;]*)?/gi, " ")
+        .replace(/\bopencode\s+host\b[^，。；,;]*/gi, " ")
+        .replace(/[a-z]:[\\/][^\s，。；、)）]*/gi, " ")
+        .replace(/(?:^|\s)\/(?:[\w.@+-]+\/)+[\w.@+-]*/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
 }
 
 /**
- * What the end notice says the fold was about: the opening sentence of every
- * summary that was actually substituted, joined and capped. Empty bodies drop
- * out so the notice never renders an empty `—— ` tail.
+ * One meaningful topic line. Sentence dots inside a version or decimal
+ * (`2.2.1`, `3.5`) are not terminators; a dot followed by whitespace or the
+ * end of the text is.
  */
-export function autoFoldOverview(ranges: Array<{ body: string }>): string {
-    const parts = ranges.map((range) => summaryExcerpt(range.body)).filter((part) => part !== "")
-    if (parts.length === 0) return ""
-    const joined = parts.join(" / ")
-    return joined.length > OVERVIEW_LIMIT ? `${joined.slice(0, OVERVIEW_LIMIT)}…` : joined
+function firstTopicSentence(text: string): string {
+    const chars = Array.from(text)
+    let end = chars.length
+    for (let index = 0; index < chars.length; index++) {
+        const char = chars[index]!
+        if (char === "。" || char === "\n" || char === "：" || char === ":") {
+            end = index
+            break
+        }
+        if (char !== ".") continue
+        const previous = chars[index - 1]
+        const next = chars[index + 1]
+        if (previous !== undefined && next !== undefined && /\d/.test(previous) && /\d/.test(next))
+            continue
+        if (next === undefined || /\s/.test(next)) {
+            end = index
+            break
+        }
+    }
+    return chars.slice(0, end).join("").trim()
+}
+
+function topicLine(raw: string): string {
+    let line = raw
+        .replace(/^[\s>*#-]+/, "")
+        .replace(/^\d+[.)、]\s*/, "")
+        .replace(/`/g, "")
+        .trim()
+    if (line.length === 0) return ""
+    if (/^(?:session|conversation|chat|会话|目录|项目)\s*[:：]/i.test(line)) return ""
+    if (/^(?:[a-z]:[\\/]|~?[\\/])/i.test(line)) return ""
+    line = line.replace(/^auto-fold\b[\s:：-]*/i, "")
+    line = stripTopicMetadata(line)
+    if (line.length === 0) return ""
+    return firstTopicSentence(line)
 }
 
 /**
  * The end caption names what the fold was about, so a chat reader can tell one
  * fold from the next. The subject comes from the summary that was actually
  * substituted, cut to a title length; the token/message scale stays in the
- * notice body. A range with no usable sentence is skipped, not rendered empty.
+ * notice body. Host/path metadata and empty lines are skipped, not rendered.
  */
 export function autoFoldTopic(ranges: Array<{ body: string }>): string {
     for (const range of ranges) {
-        const excerpt = summaryExcerpt(range.body)
-        if (excerpt === "") continue
-        return excerpt.length > AUTO_FOLD_TOPIC_LIMIT
-            ? `${excerpt.slice(0, AUTO_FOLD_TOPIC_LIMIT).trimEnd()}…`
-            : excerpt
+        for (const line of range.body.replace(/\r\n/g, "\n").split("\n")) {
+            const topic = topicLine(line)
+            if (topic.length === 0) continue
+            return topic.length > AUTO_FOLD_TOPIC_LIMIT
+                ? `${topic.slice(0, AUTO_FOLD_TOPIC_LIMIT).trimEnd()}…`
+                : topic
+        }
     }
     return ""
 }
@@ -172,7 +201,7 @@ export function formatAutoFoldEndDescription(ranges: Array<{ body: string }>): s
     return topic ? `${AUTO_FOLD_DONE_NOTICE}：${topic}` : AUTO_FOLD_DONE_NOTICE
 }
 
-/** The end notice: scale of the fold plus the subject of what replaced it. */
+/** The end notice: the fold's subject, then its scale. */
 export function formatAutoFoldEndNotice(input: {
     beforeTokens: number
     afterTokens: number
@@ -180,9 +209,9 @@ export function formatAutoFoldEndNotice(input: {
     segments: number
     ranges: Array<{ body: string }>
 }): string {
-    const overview = autoFoldOverview(input.ranges)
+    const topic = autoFoldTopic(input.ranges)
     const scale = `${formatTokens(input.beforeTokens)} → ${formatTokens(input.afterTokens)}，折叠 ${input.compressedMessages} 条消息（${input.segments} 段）`
-    return `${AUTO_FOLD_NOTICE_PREFIX}${scale}${overview ? `—— ${overview}` : ""}`
+    return `${AUTO_FOLD_NOTICE_PREFIX}${topic ? `${topic}｜` : ""}${scale}`
 }
 
 function hasOpenToolCall(message: WithParts): boolean {
@@ -283,15 +312,29 @@ export function selectAutoFoldRuns(input: {
 
     const closeRun = () => {
         if (current.length === 0) return
-        const first = current[0]!
-        const last = current[current.length - 1]!
+        // A subagent's initial prompt gets no message ref (it is host-owned), so a
+        // run that starts there cannot be selected. Trim such leading units
+        // instead of discarding the foldable tail with them.
+        let start = 0
+        while (
+            start < current.length &&
+            state.messageIds.byRawId.get(current[start]!.messageId) === undefined
+        )
+            start++
+        const run = current.slice(start)
+        if (run.length === 0) {
+            current = []
+            return
+        }
+        const first = run[0]!
+        const last = run[run.length - 1]!
         const startId = state.messageIds.byRawId.get(first.messageId)
         const endId = state.messageIds.byRawId.get(last.messageId)
         if (startId !== undefined && endId !== undefined) {
             runs.push({
                 startId,
                 endId,
-                tokens: current.reduce((total, unit) => total + unit.tokens, 0),
+                tokens: run.reduce((total, unit) => total + unit.tokens, 0),
             })
         }
         current = []
@@ -432,9 +475,10 @@ export function resolveAutoFold(ctx: ToolContext): AutoFoldResolution {
 export function autoFoldBlocker(
     state: SessionState,
     resolution: AutoFoldResolution,
+    allowSubAgents: boolean,
 ): AutoFoldSkipReason | undefined {
     if (!resolution.autoFold) return resolution.reason ?? "disabled"
-    if (state.isSubAgent) return "subagent"
+    if (state.isSubAgent && !allowSubAgents) return "subagent"
     if (state.compressPermission === "deny" || state.compressPermission === "ask")
         return "permission"
     if (state.manualMode) return "manual"
@@ -481,7 +525,11 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
     const { ctx, sessionID, messages } = input
     const resolution = resolveAutoFold(ctx)
     const autoFold = resolution.autoFold
-    const blocker = autoFoldBlocker(ctx.state, resolution)
+    const blocker = autoFoldBlocker(
+        ctx.state,
+        resolution,
+        ctx.config.experimental.allowSubAgents,
+    )
     const contextTokens = analyzeContextTokens(ctx.state, messages).total
 
     if (!autoFold || blocker) {
@@ -635,7 +683,11 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
     const { ctx, sessionID, messages } = input
     const resolution = resolveAutoFold(ctx)
     const autoFold = resolution.autoFold
-    const blocker = autoFoldBlocker(ctx.state, resolution)
+    const blocker = autoFoldBlocker(
+        ctx.state,
+        resolution,
+        ctx.config.experimental.allowSubAgents,
+    )
     const contextTokens = analyzeContextTokens(ctx.state, messages).total
 
     if (!autoFold || blocker) {
