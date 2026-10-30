@@ -109,6 +109,13 @@ export interface PendingManualTrigger {
     prompt: string
 }
 
+/** Chat notice for a committed fold, held until the next steer prompt carries it. */
+export interface PendingAutoFoldNotice {
+    text: string
+    description: string
+    metadata: Record<string, string>
+}
+
 export interface MessageIdState {
     byRawId: Map<string, string>
     byRef: Map<string, string>
@@ -143,12 +150,15 @@ export interface SessionState {
     systemPromptTokens: number | undefined
     /** Summarized fold waiting for the next request hook; consumed at most once. */
     preparedAutoFold: PreparedAutoFold | null
+    /** Completion notice for a committed fold, flushed at the next steer prompt. */
+    pendingAutoFoldNotice: PendingAutoFoldNotice | null
+    /** User message the pending notice was attached to, cleared once it is durable. */
+    autoFoldNoticeAttachedTo: string | null
     /**
-     * Real user message of the turn whose auto-fold start was already announced
-     * in chat. The announcement is per anchor, not per attempt: a summary that
-     * fails leaves no artifact, so the next terminal event re-enters prepare and
-     * must not repeat the start notice. A newer user message changes the anchor
-     * and naturally retires the marker.
+     * Real user message whose auto-fold was committed. Also written by older
+     * versions for the removed start notice, so an old marker only skips one turn.
+     * The artifact is consumed at commit, so this is what dedupes a repeated
+     * terminal event for the same turn.
      */
     autoFoldAnnouncedFor: string | null
 }

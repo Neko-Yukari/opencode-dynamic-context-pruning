@@ -10,6 +10,7 @@ import { homedir } from "os"
 import { join } from "path"
 import type {
     CompressionBlock,
+    PendingAutoFoldNotice,
     PreparedAutoFold,
     PrunedMessageEntry,
     SessionState,
@@ -53,7 +54,11 @@ export interface PersistedSessionState {
     lastCompaction?: number
     /** Summarized auto-fold waiting for the next request after a restart. */
     autoFold?: PreparedAutoFold | null
-    /** Anchor user message whose fold start was already announced in chat. */
+    /** Completion notice for a committed fold, not yet shown in chat. */
+    autoFoldNotice?: PendingAutoFoldNotice | null
+    /** User message carrying the pending notice, until it is durable. */
+    autoFoldNoticeAttachedTo?: string | null
+    /** Real user message whose auto-fold was committed (dedupes repeat events). */
     autoFoldAnnouncedFor?: string | null
 }
 
@@ -118,6 +123,8 @@ export async function saveSessionState(
         messageIds: serializeMessageIdState(sessionState),
         lastCompaction: sessionState.lastCompaction,
         autoFold: sessionState.preparedAutoFold ?? null,
+        autoFoldNotice: sessionState.pendingAutoFoldNotice ?? null,
+        autoFoldNoticeAttachedTo: sessionState.autoFoldNoticeAttachedTo ?? null,
         autoFoldAnnouncedFor: sessionState.autoFoldAnnouncedFor ?? null,
         lastUpdated: new Date().toISOString(),
     }

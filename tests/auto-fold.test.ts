@@ -12,10 +12,11 @@ import {
 import type { PluginConfig } from "../lib/config"
 import type { Logger } from "../lib/logger"
 import {
+    AUTO_FOLD_DONE_NOTICE,
     AUTO_FOLD_NOTICE_PREFIX,
-    AUTO_FOLD_FAILED_PREFIX,
-    AUTO_FOLD_START_NOTICE,
     autoFoldOverview,
+    autoFoldTopic,
+    formatAutoFoldEndDescription,
     formatAutoFoldEndNotice,
     prepareAutoFold,
     projectAutoFold,
@@ -24,6 +25,7 @@ import {
 } from "../lib/compress/autofold"
 import { foldPrepareTrigger, type IdleHookEvent } from "../lib/v2/fold-events"
 import { IDLE_HOOK, registerIdlePrepare } from "../lib/v2/idle-hook"
+import { attachAutoFoldNotice, confirmAutoFoldNotice } from "../lib/v2/auto-fold-notice"
 import { wrapCompressedSummary, COMPRESSED_BLOCK_HEADER } from "../lib/compress/state"
 import { getInvalidConfigKeys, validateConfigTypes } from "../lib/config"
 
@@ -254,9 +256,6 @@ function buildNotices() {
         notify: async (notice: AutoFoldNotice) => {
             notices.push(notice)
         },
-        start: () => notices.filter((notice) => notice.text === AUTO_FOLD_START_NOTICE),
-        failed: () => notices.filter((notice) => notice.text.startsWith(AUTO_FOLD_FAILED_PREFIX)),
-        end: () => notices.filter((notice) => notice.text.startsWith(AUTO_FOLD_NOTICE_PREFIX)),
     }
 }
 
@@ -574,7 +573,7 @@ test("an explicit trigger starts the fold regardless of the growth that was conf
     const folded = await run(2_000)
     assert.equal(folded.prepared.prepared, true)
     assert.equal(folded.calls, 1)
-    assert.equal(folded.notices.start().length, 1)
+    assert.equal(folded.notices.notices.length, 0)
 
     // The same history stays idle when the trigger is above it.
     const skipped = await run(6_000)
@@ -651,10 +650,9 @@ test("prepare authors the fold artifact without touching the request path", asyn
     const persisted = await loadSessionState(sessionID, ctx.logger)
     assert.equal(persisted?.autoFold?.topic, "Auto-fold: 5k -> 1k")
     assert.equal(persisted?.autoFold?.ranges.length, 1)
-    // One start notice, and no end notice before the fold is committed.
-    assert.equal(notices.start().length, 1)
-    assert.equal(notices.start()[0]!.text, "触发自动压缩")
-    assert.equal(notices.end().length, 0)
+    // Prepare never announces anything; only a committed fold leaves a notice.
+    assert.equal(notices.notices.length, 0)
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
 })
 
 test("the hook projects a prepared artifact with zero summarizer calls", async () => {
@@ -695,13 +693,63 @@ test("the hook projects a prepared artifact with zero summarizer calls", async (
     assert.match(block.summary, /Originals: dcp_read\(\{"startId":"b1"\}\)/)
     // The artifact is consumed exactly once.
     assert.equal(ctx.state.preparedAutoFold, null)
-    assert.equal(notices.end().length, 1)
-    const notice = notices.end()[0]!
+    const notice = ctx.state.pendingAutoFoldNotice!
     assert.ok(notice.text.startsWith("自动压缩已应用："))
     const detail = notice.text.slice(AUTO_FOLD_NOTICE_PREFIX.length)
     // The end notice reports the scale, what was folded, and the subject of the
     // substituted summary.
     assert.match(detail, /^\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）—— Folded findings retained$/)
+    // No host message is admitted from the request path; the prompt hook flushes it.
+    assert.equal(notices.notices.length, 0)
+})
+
+test("a committed fold holds one completion notice, with no start notice", async () => {
+    const sessionID = `ses_autofold_captions_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer({ calls: 0 }),
+    })
+
+    await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
+
+    const folded = await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+    assert.equal(folded.folded, true)
+
+    const notice = ctx.state.pendingAutoFoldNotice!
+    assert.equal(notice.description, "自动压缩完成：Folded findings retained")
+    assert.match(
+        notice.text,
+        /^自动压缩已应用：\d+(\.\d+)?[kM]? → \d+(\.\d+)?[kM]?，折叠 5 条消息（1 段）—— Folded findings retained$/,
+    )
+    assert.deepEqual(notice.metadata, { source: "dcp.autofold", event: "end" })
+})
+
+test("a failed fold leaves no notice and only logs", async () => {
+    const sessionID = `ses_autofold_failcaption_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const logs: string[] = []
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        logs,
+        summarizer: {
+            models: async () => [
+                { providerID: "test", id: "model", limit: { context: 200_000, output: 32_000 } },
+            ],
+            generate: async () => {
+                throw new Error("summarizer exploded")
+            },
+        },
+    })
+
+    const prepared = await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
+
+    assert.equal(prepared.prepared, false)
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
+    assert.ok(logs.some((line) => line.startsWith("warn DCP auto-fold prepare failed")))
 })
 
 test("the end notice overview is the opening sentence of each substituted summary", () => {
@@ -759,6 +807,26 @@ test("the end notice renders scale plus the overview of what replaced the histor
     )
 })
 
+test("the completion caption names the folded subject within a title budget", () => {
+    assert.equal(
+        formatAutoFoldEndDescription([{ body: "Folded findings retained." }]),
+        "自动压缩完成：Folded findings retained",
+    )
+    // No usable summary sentence: the caption still says the fold completed.
+    assert.equal(formatAutoFoldEndDescription([{ body: "   \n " }]), AUTO_FOLD_DONE_NOTICE)
+    // A subject that carries no sentence terminator is cut to the title budget.
+    const long = formatAutoFoldEndDescription([{ body: "x".repeat(200) }])
+    assert.ok(long.startsWith("自动压缩完成："))
+    assert.equal(long.length, "自动压缩完成：".length + 41)
+    assert.ok(long.endsWith("…"))
+    // The first range with a real sentence supplies the subject.
+    assert.equal(
+        formatAutoFoldEndDescription([{ body: "" }, { body: "Tests split by suite." }]),
+        "自动压缩完成：Tests split by suite",
+    )
+    assert.equal(autoFoldTopic([]), "")
+})
+
 test("the end notice omits the overview when the substituted summary is empty", async () => {
     const sessionID = `ses_autofold_emptyoverview_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
@@ -781,7 +849,7 @@ test("the end notice omits the overview when the substituted summary is empty", 
     })
 
     assert.equal(folded.folded, true)
-    const notice = notices.end()[0]!
+    const notice = ctx.state.pendingAutoFoldNotice!
     assert.ok(notice.text.startsWith("自动压缩已应用："))
     assert.equal(notice.text.includes("—— "), false)
     assert.match(
@@ -934,7 +1002,7 @@ test("notices are emitted once per fold and never repeat", async () => {
     assert.equal(second.prepared, false)
     assert.equal(second.reason, "already-prepared")
     assert.equal(counter.calls, 1)
-    assert.equal(notices.start().length, 1)
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
 
     const folded = await projectAutoFold({
         ctx,
@@ -953,44 +1021,95 @@ test("notices are emitted once per fold and never repeat", async () => {
     assert.equal(repeated.folded, false)
     assert.equal(repeated.reason, "no-artifact")
     assert.equal(ctx.state.prune.messages.blocksById.size, 1)
-    assert.equal(notices.start().length, 1)
-    assert.equal(notices.end().length, 1)
+    assert.ok(ctx.state.pendingAutoFoldNotice?.text.startsWith("自动压缩已应用："))
 })
 
-test("a failing notice never aborts the fold", async () => {
-    const sessionID = `ses_autofold_noticefail_${Date.now()}`
+test("a committed fold is not summarized again for the same turn", async () => {
+    const sessionID = `ses_autofold_committed_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
     const config = buildConfig()
     config.compress.model = "test/model"
     const counter = { calls: 0 }
-    const logs: string[] = []
     const ctx = buildContext(sessionID, rawMessages, config, {
         summarizer: buildSummarizer(counter),
-        logs,
     })
-    const notify = async () => {
-        throw new Error("inbox unavailable")
-    }
 
-    const prepared = await prepareAutoFold({ ctx, sessionID, messages: rawMessages, notify })
-    const folded = await projectAutoFold({ ctx, sessionID, messages: rawMessages, notify })
+    const prepared = await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
+    const folded = await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+    // The artifact is consumed by the commit; a repeated terminal event for the
+    // same user message must not spend a second summarizer call.
+    const repeated = await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
 
     assert.equal(prepared.prepared, true)
     assert.equal(folded.folded, true)
-    assert.equal(ctx.state.prune.messages.blocksById.size, 1)
-    assert.ok(
-        logs.some((line) => line.startsWith("warn DCP auto-fold notice failed")),
-        logs.join("\n"),
-    )
+    assert.equal(repeated.prepared, false)
+    assert.equal(repeated.reason, "already-prepared")
+    assert.equal(counter.calls, 1)
 })
 
-test("a failing summary announces its start once and closes it with a failure notice", async () => {
+test("the pending completion statement is attached once and cleared after admission", async () => {
+    const sessionID = `ses_autofold_attach_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer({ calls: 0 }),
+    })
+    await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
+    await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+    const pending = ctx.state.pendingAutoFoldNotice!
+
+    const text = attachAutoFoldNotice(ctx.state, "msg-user-9", "Next")
+    assert.equal(text, `${pending.text}\n\nNext`)
+    assert.equal(ctx.state.autoFoldNoticeAttachedTo, "msg-user-9")
+    // Not admitted yet: the notice is still pending and a failed turn keeps it.
+    assert.equal(confirmAutoFoldNotice(ctx.state, rawMessages), false)
+    assert.ok(ctx.state.pendingAutoFoldNotice)
+
+    // The admitted message consumes the statement exactly once.
+    const admitted = [
+        ...rawMessages,
+        { info: { id: "msg-user-9", role: "user" }, parts: [] } as unknown as WithParts,
+    ]
+    assert.equal(confirmAutoFoldNotice(ctx.state, admitted), true)
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
+    assert.equal(ctx.state.autoFoldNoticeAttachedTo, null)
+    assert.equal(confirmAutoFoldNotice(ctx.state, admitted), false)
+    // With nothing pending the next prompt text is untouched.
+    assert.equal(attachAutoFoldNotice(ctx.state, "msg-user-10", "Later"), "Later")
+})
+
+test("a failed prompt keeps the pending statement for the retry", async () => {
+    const sessionID = `ses_autofold_attachfail_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer({ calls: 0 }),
+    })
+    await prepareAutoFold({ ctx, sessionID, messages: rawMessages })
+    await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+    const pending = ctx.state.pendingAutoFoldNotice!
+
+    // The hook prefixed a prompt that never reached the context.
+    attachAutoFoldNotice(ctx.state, "msg-failed", "Retry")
+    assert.equal(confirmAutoFoldNotice(ctx.state, rawMessages), false)
+    assert.deepEqual(ctx.state.pendingAutoFoldNotice, pending)
+
+    // The retry carries the same statement rather than losing it.
+    assert.equal(attachAutoFoldNotice(ctx.state, "msg-retry", "Retry"), `${pending.text}\n\nRetry`)
+    assert.equal(ctx.state.autoFoldNoticeAttachedTo, "msg-retry")
+})
+
+test("a failed summary leaves no artifact and no notice", async () => {
     const sessionID = `ses_autofold_failnotice_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
     const config = buildConfig()
     config.compress.model = "test/model"
     const notices = buildNotices()
+    const logs: string[] = []
     const ctx = buildContext(sessionID, rawMessages, config, {
+        logs,
         summarizer: {
             models: async () => [
                 { providerID: "test", id: "model", limit: { context: 200_000, output: 32_000 } },
@@ -1008,8 +1127,7 @@ test("a failing summary announces its start once and closes it with a failure no
         notify: notices.notify,
         trigger: "session.execution.succeeded",
     })
-    // A failed summary leaves no artifact, so the next terminal event reaches the
-    // announce point again; the same anchor must not announce a second start.
+    // A retry may run again because no artifact was claimed, but it stays silent.
     const second = await prepareAutoFold({
         ctx,
         sessionID,
@@ -1021,56 +1139,10 @@ test("a failing summary announces its start once and closes it with a failure no
     assert.equal(first.prepared, false)
     assert.equal(second.prepared, false)
     assert.equal(ctx.state.preparedAutoFold, null)
-    assert.equal(ctx.state.autoFoldAnnouncedFor, "msg-user-7")
-    assert.equal(notices.start().length, 1)
-    assert.equal(notices.end().length, 0)
-    // The announced start always has a follow-up, and the reason stays one line.
-    assert.equal(notices.failed().length, 1)
-    const failure = notices.failed()[0]!
-    assert.ok(failure.text.startsWith(AUTO_FOLD_FAILED_PREFIX))
-    assert.match(failure.text, /summarizer exploded/)
-    // One line, no stack trace or multi-line provider payload.
-    assert.equal(failure.text.includes("\n"), false)
-    assert.ok(failure.text.length <= AUTO_FOLD_FAILED_PREFIX.length + 101)
-    assert.equal(failure.description, "自动压缩")
-    assert.deepEqual(failure.metadata, { source: "dcp.autofold", event: "failed" })
-})
-
-test("a new anchor message lets the next fold announce its start again", async () => {
-    const sessionID = `ses_autofold_newanchor_${Date.now()}`
-    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
-    const config = buildConfig()
-    config.compress.model = "test/model"
-    const notices = buildNotices()
-    let fail = true
-    const ctx = buildContext(sessionID, rawMessages, config, {
-        summarizer: {
-            models: async () => [
-                { providerID: "test", id: "model", limit: { context: 200_000, output: 32_000 } },
-            ],
-            generate: async () => {
-                if (fail) throw new Error("summarizer exploded")
-                return { text: "Folded findings retained." }
-            },
-        },
-    })
-
-    await prepareAutoFold({ ctx, sessionID, messages: rawMessages, notify: notices.notify })
-    assert.equal(notices.start().length, 1)
-    // A new real user message is a new turn: the marker retires by comparison,
-    // with no timer and no second state machine.
-    ;(rawMessages[rawMessages.length - 1]!.info as { id: string }).id = "msg-user-99"
-    fail = false
-    const prepared = await prepareAutoFold({
-        ctx,
-        sessionID,
-        messages: rawMessages,
-        notify: notices.notify,
-    })
-
-    assert.equal(prepared.prepared, true)
-    assert.equal(ctx.state.autoFoldAnnouncedFor, "msg-user-99")
-    assert.equal(notices.start().length, 2)
+    assert.equal(ctx.state.pendingAutoFoldNotice, null)
+    assert.equal(notices.notices.length, 0)
+    // The provider payload stays in the diagnostics log, not in chat.
+    assert.ok(logs.some((line) => line.startsWith("warn DCP auto-fold prepare failed")))
 })
 
 test("prepare logs every attempt with its trigger and outcome", async () => {
@@ -1170,9 +1242,9 @@ test("session.idle starts a prepare and repeated terminal events prepare once", 
         reasons.push(result.reason)
     }
 
-    // One summarizer call and one start notice for all four turn-end events.
+    // One summarizer call for all four turn-end events; no chat notice yet.
     assert.equal(counter.calls, 1)
-    assert.equal(notices.start().length, 1)
+    assert.equal(notices.notices.length, 0)
     assert.deepEqual(reasons, [undefined, "already-prepared", "already-prepared", "already-prepared"])
     // Unrelated events and other directories never start a prepare.
     assert.equal(foldPrepareTrigger({ type: "session.status", data: { sessionID } }, directory), undefined)
@@ -1278,7 +1350,7 @@ test("an idle hook and a terminal event for the same anchor prepare only once", 
     assert.equal(second.prepared, false)
     assert.equal(second.reason, "already-prepared")
     assert.equal(counter.calls, 1)
-    assert.equal(notices.start().length, 1)
+    assert.equal(notices.notices.length, 0)
 })
 
 test("an unknown idle hook kind only warns and keeps the event path available", async () => {

@@ -41,16 +41,16 @@ import { consumeNoteInjection, createNotes } from "../notes"
 import { createReleaseTool } from "../release"
 import { createFullHistoryReader } from "./full-history"
 import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
-import { createNotifier } from "./notify"
 import { foldPrepareTrigger } from "./fold-events"
 import { IDLE_HOOK, idleHook, registerIdlePrepare } from "./idle-hook"
+import { attachAutoFoldNotice, confirmAutoFoldNotice } from "./auto-fold-notice"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
-// That is exactly why the auto-fold completion notice uses synthetic() instead:
-// the user asked for a chat-visible notice shaped like a peer message, and peer
-// messages reach the model the same way. Text on that path must stay a
-// statement of what happened, never an instruction the model could act on.
+// Auto-fold does not use synthetic() either: its completion statement is
+// attached to the next user message, which is the only admission the host makes
+// for that turn. Text on that path must stay a statement of what happened,
+// never an instruction the model could act on.
 export async function report(logger: Logger, text: string, sessionID?: string) {
     logger.debug("V2 report (display pending)", { sessionID, text })
 }
@@ -181,26 +181,65 @@ export async function setup(ctx: Plugin.Context) {
             )
     }
 
-    const notify = createNotifier(ctx, logger)
-
     // Auto-fold prepare runs after the turn ends, never inside a request. The
     // context hook below only projects what this prepared. Two paths reach the
     // same prepare: the host bus events (fallback) and, on OpenCode 2.2.1+, the
     // experimental.idle session hook. Repeated triggers collapse in
-    // prepareAutoFold through the prepared-artifact anchor and its TTL.
+    // prepareAutoFold through the prepared artifact and, once committed, the
+    // anchor marker.
+    //
+    // The completion statement is prepended to the next real user message in the
+    // prompt hook, so it shares that message's admission. A synthetic row would
+    // be separate input and can be promoted as a model step of its own.
     const foldAbort = new AbortController()
     if (config.compress.autoFold?.enabled === true) {
+        await ctx.session.hook("prompt", async (event) => {
+            try {
+                const { state, messages } = await load(event.sessionID)
+                // A prompt that was already admitted but never reached a context
+                // hook still consumed its statement; clear it before attaching.
+                if (confirmAutoFoldNotice(state, messages)) await saveSessionState(state, logger)
+                const text = attachAutoFoldNotice(state, event.messageID, event.prompt.text)
+                if (text === event.prompt.text) return
+                // Persist the attachment before the host admits the message; the
+                // notice is cleared only once that message is durable.
+                await saveSessionState(state, logger)
+                event.prompt.text = text
+                logger.info("DCP auto-fold completion statement attached", {
+                    sessionID: event.sessionID,
+                    messageID: event.messageID,
+                })
+            } catch (error) {
+                logger.warn("DCP auto-fold completion statement not attached", {
+                    sessionID: event.sessionID,
+                    error: (error as Error)?.message ?? String(error),
+                })
+            }
+        })
         const prepareFold = async (sessionID: string, trigger: string, background?: boolean) => {
             try {
                 const { state, messages } = await load(sessionID)
+                const foldCtx = { client, state, logger, config, prompts, summarizer }
                 // prepareAutoFold logs every attempt with this trigger.
-                await prepareAutoFold({
-                    ctx: { client, state, logger, config, prompts, summarizer },
+                const prepared = await prepareAutoFold({
+                    ctx: foldCtx,
                     sessionID,
                     messages,
-                    notify,
                     trigger,
                 })
+                // Commit off the request path so the completion is real before the
+                // next prompt. The context hook still projects legacy artifacts.
+                if (prepared.prepared) {
+                    try {
+                        await projectAutoFold({ ctx: foldCtx, sessionID, messages })
+                    } catch (error) {
+                        logger.warn("DCP auto-fold commit skipped", {
+                            trigger,
+                            sessionID,
+                            error: (error as Error)?.message ?? String(error),
+                        })
+                    }
+                }
             } catch (error) {
                 logger.warn("DCP auto-fold prepare skipped", {
                     trigger,
@@ -260,6 +299,10 @@ export async function setup(ctx: Plugin.Context) {
             state.modelOutputLimit = limit?.output
             state.systemPromptTokens = countTokens(event.system.map((part) => part.text).join("\n"))
             if (kind === "context") {
+                // The prompt hook attached the completion statement before the
+                // host admitted the message; once it is durable here, the notice
+                // has been consumed exactly once.
+                if (confirmAutoFoldNotice(state, messages)) await saveSessionState(state, logger)
                 // Local substitution of a fold prepared after the previous turn:
                 // no model call on this path, and a missing or stale artifact only
                 // logs a reason instead of blocking the request.
@@ -267,7 +310,6 @@ export async function setup(ctx: Plugin.Context) {
                     ctx: { client, state, logger, config, prompts, summarizer },
                     sessionID: event.sessionID,
                     messages,
-                    notify,
                 })
             }
             const view = project(event.messages, entries, {

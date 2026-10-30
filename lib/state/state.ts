@@ -96,6 +96,8 @@ export function createSessionState(idFormat: IdFormat = "xml"): SessionState {
         modelOutputLimit: undefined,
         systemPromptTokens: undefined,
         preparedAutoFold: null,
+        pendingAutoFoldNotice: null,
+        autoFoldNoticeAttachedTo: null,
         autoFoldAnnouncedFor: null,
     }
 }
@@ -133,6 +135,8 @@ export function resetSessionState(state: SessionState): void {
     state.modelOutputLimit = undefined
     state.systemPromptTokens = undefined
     state.preparedAutoFold = null
+    state.pendingAutoFoldNotice = null
+    state.autoFoldNoticeAttachedTo = null
     state.autoFoldAnnouncedFor = null
 }
 
@@ -173,6 +177,8 @@ export async function ensureSessionInitialized(
     }
 
     state.preparedAutoFold = persisted.autoFold?.version === 1 ? persisted.autoFold : null
+    state.pendingAutoFoldNotice = persisted.autoFoldNotice ?? null
+    state.autoFoldNoticeAttachedTo = persisted.autoFoldNoticeAttachedTo ?? null
     state.autoFoldAnnouncedFor = persisted.autoFoldAnnouncedFor ?? null
     state.prune.tools = loadPruneMap(persisted.prune.tools)
     state.prune.messages = loadPruneMessagesState(persisted.prune.messages)

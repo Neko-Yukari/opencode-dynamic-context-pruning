@@ -16,10 +16,10 @@ import type { SearchContext, ToolContext } from "./types"
  *
  * `prepareAutoFold` runs after a turn ends (session execution terminal event): it
  * picks the safe ranges, has the summarizer author each summary and persists the
- * artifact on the session state. `projectAutoFold` runs inside the V2 context
- * hook and only substitutes a persisted artifact, reusing `compressResolvedRanges`
- * so blocks, protection, state and note injection stay identical to the manual
- * compress path.
+ * artifact on the session state. The V2 setup commits it immediately with
+ * `projectAutoFold`, and the context hook still projects artifacts left by an
+ * older version. Both reuse `compressResolvedRanges` so blocks, protection, state
+ * and note injection stay identical to the manual compress path.
  *
  * Safety rules are unchanged: disabled by default, no subagents, no denied/ask
  * permission, no manual mode, only above `triggerTokens` (default `targetTokens + 4k`), the
@@ -69,27 +69,31 @@ export interface AutoFoldInput {
     sessionID: string
     /** Messages representing the current context; used for token accounting only. */
     messages: WithParts[]
-    /** Renders the user-visible notices through the host message inbox. */
+    /**
+     * Retained so existing callers keep compiling. The completion statement is
+     * attached to the next user message; nothing is sent as host input here.
+     */
     notify?: AutoFoldNotify
     /** Host event that started this prepare pass; named in the log line. */
     trigger?: string
 }
 
 /**
- * Notices are user-visible chat messages, never toasts. Their wording and
- * delivery are deliberate: the start notice marks the summarizer spend, the end
- * notice reports the scale and subject of the fold, and the failure notice
- * answers a start that never produced a fold.
+ * A committed fold is reported once by prepending its statement to the next real
+ * user message. The statement waits on the session state (`pendingAutoFoldNotice`)
+ * and the prompt hook adds it before admission, so it shares that message's
+ * submission instead of creating a notice of its own.
  */
-export const AUTO_FOLD_START_NOTICE = "触发自动压缩"
 export const AUTO_FOLD_NOTICE_LABEL = "自动压缩"
+export const AUTO_FOLD_DONE_NOTICE = `${AUTO_FOLD_NOTICE_LABEL}完成`
 export const AUTO_FOLD_NOTICE_PREFIX = "自动压缩已应用："
-export const AUTO_FOLD_FAILED_PREFIX = "自动压缩未完成："
 const AUTO_FOLD_NOTICE_SOURCE = "dcp.autofold"
 /** Longest single-range excerpt in an end notice. */
 const OVERVIEW_RANGE_LIMIT = 120
 /** Longest combined overview in an end notice. */
 const OVERVIEW_LIMIT = 240
+/** Longest content title in the end caption. */
+const AUTO_FOLD_TOPIC_LIMIT = 40
 // A prepared fold is only useful for the request that follows its turn. Anything
 // older is abandoned instead of resurrecting an unrelated summary after a restart.
 const PREPARED_FOLD_TTL_MS = 30 * 60_000
@@ -113,30 +117,6 @@ const projectingSessions = new Set<string>()
 
 function errorMessage(error: unknown): string {
     return (error as Error)?.message ?? String(error)
-}
-
-/** Short single-line reason for the failure notice; never a payload dump. */
-function shortReason(error: unknown): string {
-    const text = errorMessage(error).replace(/\s+/g, " ").trim()
-    if (text.length === 0) return "摘要失败"
-    return text.length > 100 ? `${text.slice(0, 100)}…` : text
-}
-
-async function notify(
-    ctx: ToolContext,
-    send: AutoFoldNotify | undefined,
-    notice: AutoFoldNotice,
-): Promise<void> {
-    if (!send) return
-    try {
-        await send(notice)
-    } catch (error) {
-        // A missed notice must never abort or fake a fold.
-        ctx.logger.warn("DCP auto-fold notice failed", {
-            text: notice.text,
-            error: errorMessage(error),
-        })
-    }
 }
 
 function formatTokens(tokens: number): string {
@@ -167,6 +147,29 @@ export function autoFoldOverview(ranges: Array<{ body: string }>): string {
     if (parts.length === 0) return ""
     const joined = parts.join(" / ")
     return joined.length > OVERVIEW_LIMIT ? `${joined.slice(0, OVERVIEW_LIMIT)}…` : joined
+}
+
+/**
+ * The end caption names what the fold was about, so a chat reader can tell one
+ * fold from the next. The subject comes from the summary that was actually
+ * substituted, cut to a title length; the token/message scale stays in the
+ * notice body. A range with no usable sentence is skipped, not rendered empty.
+ */
+export function autoFoldTopic(ranges: Array<{ body: string }>): string {
+    for (const range of ranges) {
+        const excerpt = summaryExcerpt(range.body)
+        if (excerpt === "") continue
+        return excerpt.length > AUTO_FOLD_TOPIC_LIMIT
+            ? `${excerpt.slice(0, AUTO_FOLD_TOPIC_LIMIT).trimEnd()}…`
+            : excerpt
+    }
+    return ""
+}
+
+/** The visible end caption: completion plus the subject of what was folded. */
+export function formatAutoFoldEndDescription(ranges: Array<{ body: string }>): string {
+    const topic = autoFoldTopic(ranges)
+    return topic ? `${AUTO_FOLD_DONE_NOTICE}：${topic}` : AUTO_FOLD_DONE_NOTICE
 }
 
 /** The end notice: scale of the fold plus the subject of what replaced it. */
@@ -475,7 +478,7 @@ export async function prepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPre
 }
 
 async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepareResult> {
-    const { ctx, sessionID, messages, notify: send } = input
+    const { ctx, sessionID, messages } = input
     const resolution = resolveAutoFold(ctx)
     const autoFold = resolution.autoFold
     const blocker = autoFoldBlocker(ctx.state, resolution)
@@ -495,9 +498,6 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         return { prepared: false, reason: "in-flight", contextTokens }
     }
     preparingSessions.add(sessionID)
-    // Whether this attempt delivered a start notice, so a later failure can
-    // answer it. Set only after the announcement actually happens.
-    let announced = false
 
     try {
         const toolCtx = {
@@ -513,6 +513,12 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         const owner = lastRealUserMessage(rawMessages)
         if (!owner) {
             return { prepared: false, reason: "no-safe-range", contextTokens }
+        }
+        // The artifact is consumed as soon as it is committed, so the anchor
+        // marker is what keeps repeated terminal events for one turn from
+        // spending a second summarizer call.
+        if (ctx.state.autoFoldAnnouncedFor === owner.info.id) {
+            return { prepared: false, reason: "already-prepared", contextTokens }
         }
         // Repeated terminal events for the same turn must not summarize twice.
         const existing = ctx.state.preparedAutoFold
@@ -556,22 +562,8 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         }
 
         // Everything below spends a model call, so the fold genuinely starts here.
-        // The start notice is sent at most once per anchor turn: a summary that
-        // fails leaves no artifact, so the next terminal event reaches this point
-        // again and must not announce a second start for the same turn.
-        const announce = ctx.state.autoFoldAnnouncedFor !== owner.info.id
-        if (announce) {
-            announced = true
-            ctx.state.autoFoldAnnouncedFor = owner.info.id
-            await saveSessionState(ctx.state, ctx.logger)
-            await notify(ctx, send, {
-                sessionID,
-                text: AUTO_FOLD_START_NOTICE,
-                description: AUTO_FOLD_NOTICE_LABEL,
-                metadata: { source: AUTO_FOLD_NOTICE_SOURCE, event: "start" },
-            })
-        }
-
+        // The start is not announced: only a committed fold produces a statement,
+        // and that statement is attached to the next user message.
         const signal = new AbortController().signal
         const ranges: PreparedAutoFoldRange[] = []
         let compressedTokens = 0
@@ -624,18 +616,10 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         return { prepared: true, contextTokens, preparedTokens: compressedTokens }
     } catch (error) {
         // Fail open: nothing is claimed and the original context stays untouched.
+        // A failed prepare is diagnostics only; there is no start notice to answer.
         ctx.logger.warn("DCP auto-fold prepare failed; original context retained", {
             error: errorMessage(error),
         })
-        // An announced start must have a follow-up, otherwise the user sees a
-        // fold that never happened. Attempts that never announced stay silent.
-        if (announced)
-            await notify(ctx, send, {
-                sessionID,
-                text: `${AUTO_FOLD_FAILED_PREFIX}${shortReason(error)}`,
-                description: AUTO_FOLD_NOTICE_LABEL,
-                metadata: { source: AUTO_FOLD_NOTICE_SOURCE, event: "failed" },
-            })
         return { prepared: false, contextTokens, error: errorMessage(error) }
     } finally {
         preparingSessions.delete(sessionID)
@@ -648,7 +632,7 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
  * history is dropped with a logged reason instead of blocking the request.
  */
 export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldProjectResult> {
-    const { ctx, sessionID, messages, notify: send } = input
+    const { ctx, sessionID, messages } = input
     const resolution = resolveAutoFold(ctx)
     const autoFold = resolution.autoFold
     const blocker = autoFoldBlocker(ctx.state, resolution)
@@ -784,12 +768,12 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
             0,
         )
 
-        // The fold is committed; the notice must never hold the request that is
-        // being assembled, so it is dispatched without awaiting the host inbox.
+        // The fold is committed; hold its statement for the next user message. A
+        // separate synthetic admission here would be input of its own and can
+        // cost an extra model step after this one.
         const restoredTokens = prepared.ranges.reduce((total, range) => total + estimate(range.body), 0)
         const afterTokens = Math.max(0, contextTokens - compressedTokens + restoredTokens)
-        void notify(ctx, send, {
-            sessionID,
+        ctx.state.pendingAutoFoldNotice = {
             text: formatAutoFoldEndNotice({
                 beforeTokens: contextTokens,
                 afterTokens,
@@ -797,9 +781,11 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
                 segments: result.blockIds.length,
                 ranges: prepared.ranges,
             }),
-            description: AUTO_FOLD_NOTICE_LABEL,
+            description: formatAutoFoldEndDescription(prepared.ranges),
             metadata: { source: AUTO_FOLD_NOTICE_SOURCE, event: "end" },
-        })
+        }
+        ctx.state.autoFoldAnnouncedFor = owner.info.id
+        await saveSessionState(ctx.state, ctx.logger)
 
         ctx.logger.info("DCP auto-fold applied", {
             contextTokens,

@@ -160,13 +160,12 @@ Safety rules:
   instead of pretending a summary was authored.
 - Failures fail open: the original context is left untouched and a warning is logged.
 
-Each fold reports its progress with chat notices, rendered through the same host message
-mechanism peer messages use. `触发自动压缩` marks the prepare step that starts spending a
-summarizer call, and `自动压缩已应用：<before> → <after>，折叠 <n> 条消息（<m> 段）—— <overview>`
-reports the committed fold, where the overview is the opening sentence of each substituted
-summary. A fold that announced its start but failed closes with
-`自动压缩未完成：<short reason>`. They are ordinary session messages, so the model sees them
-too; a notice that fails to send is logged and never aborts the fold. Every prepare attempt
+A committed fold reports itself once, as a statement prepended to the next real user
+message: `自动压缩已应用：<before> → <after>，折叠 <n> 条消息（<m> 段）—— <overview>`, where
+the overview is the opening sentence of each substituted summary. It is part of that
+message's own submission, so there is no separate notice row and no model step of its own.
+A failed preparation leaves no chat statement, only a diagnostic log line; a prompt that
+fails before admission keeps the statement pending for the retry. Every prepare attempt
 also leaves one log line, so a fold that never ran is still explainable after the fact.
 
 Folded summaries render a concise visible title derived from the compression topic, for
