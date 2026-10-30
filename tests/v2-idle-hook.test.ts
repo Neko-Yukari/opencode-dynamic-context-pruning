@@ -82,9 +82,8 @@ test("setup warns instead of failing when the host rejects experimental.idle", a
         const cleanup = await setup(ctx)
 
         assert.equal(typeof cleanup, "function")
-        // The prompt hook is registered first; the rejected idle hook is attempted
-        // next, and the event-path hooks remain.
-        assert.deepEqual(hooks, ["prompt", "experimental.idle", "context", "compaction"])
+        // The rejected idle hook is attempted first, and the event-path hooks remain.
+        assert.deepEqual(hooks, ["experimental.idle", "context", "compaction"])
         const logFile = join(
             configHome,
             "opencode",

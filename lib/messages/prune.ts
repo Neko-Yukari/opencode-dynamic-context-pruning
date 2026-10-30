@@ -6,6 +6,7 @@ import { createSyntheticUserMessage, replaceBlockIdsWithBlocked } from "./utils"
 import { getLastUserMessage } from "./query"
 import type { UserMessage } from "@opencode-ai/sdk/v2"
 import { formatBlockRef } from "../message-ids"
+import { withCompressedBlockNote } from "../compress/state"
 
 const PRUNED_TOOL_OUTPUT_REPLACEMENT =
     "[Output removed to save context - information superseded or no longer needed]"
@@ -158,10 +159,11 @@ const filterCompressedRanges = (
                             (_, id) => formatBlockRef(Number(id), "compact"),
                         )
                     }
-                    const summaryContent =
+                    const summaryContent = withCompressedBlockNote(
                         config.compress.mode === "message"
                             ? replaceBlockIdsWithBlocked(renderedSummary, state.idFormat)
-                            : renderedSummary
+                            : renderedSummary,
+                    )
                     const summarySeed = `${summary.blockId}:${summary.anchorMessageId}`
                     result.push(
                         createSyntheticUserMessage(userMessage, summaryContent, summarySeed),

@@ -21,16 +21,26 @@ import {
 } from "../utils"
 import {
     addAnchor,
-    applyAnchoredNudges,
     countMessagesAfterIndex,
     findLastNonIgnoredMessage,
     getIterationNudgeThreshold,
     getNudgeFrequency,
     getModelInfo,
     isContextOverLimits,
+    renderCompressNudge,
 } from "./utils"
 
-export const injectCompressNudges = (
+/**
+ * Decide this request's compression nudge and return its text ("" for none).
+ *
+ * The nudge is never written into a stored message. Callers append it after the
+ * last message, so it stays out of the cached prefix and is gone on the next
+ * request instead of accumulating in history. Anchors only pace how often a
+ * nudge appears. With auto-fold enabled, folding happens between turns, so only
+ * the context-limit nudge remains, for when a fold could not bring the context
+ * back under the limit.
+ */
+export const compressNudge = (
     state: SessionState,
     config: PluginConfig,
     logger: Logger,
@@ -38,18 +48,18 @@ export const injectCompressNudges = (
     prompts: RuntimePrompts,
     compressionPriorities?: CompressionPriorityMap,
     createAnchors = true,
-): void => {
+): string => {
     if (compressPermission(state, config) === "deny") {
-        return
+        return ""
     }
 
     if (state.manualMode) {
-        return
+        return ""
     }
 
+    // Compaction requests carry no nudge.
     if (!createAnchors) {
-        applyAnchoredNudges(state, config, messages, prompts, compressionPriorities)
-        return
+        return ""
     }
 
     const lastMessage = findLastNonIgnoredMessage(messages)
@@ -60,7 +70,7 @@ export const injectCompressNudges = (
         state.nudges.turnNudgeAnchors.clear()
         state.nudges.iterationNudgeAnchors.clear()
         void saveSessionState(state, logger)
-        return
+        return ""
     }
 
     const { providerId, modelId } = getModelInfo(messages)
@@ -99,13 +109,12 @@ export const injectCompressNudges = (
                 anchorsChanged = true
             }
         }
-    } else if (overMinLimit) {
+    } else if (overMinLimit && config.compress.autoFold?.enabled !== true) {
         const isLastMessageUser = lastMessage?.message.info.role === "user"
 
         if (isLastMessageUser && lastAssistantMessage) {
             const previousSize = state.nudges.turnNudgeAnchors.size
             state.nudges.turnNudgeAnchors.add(lastMessage.message.info.id)
-            state.nudges.turnNudgeAnchors.add(lastAssistantMessage.info.id)
             if (state.nudges.turnNudgeAnchors.size !== previousSize) {
                 anchorsChanged = true
             }
@@ -141,11 +150,11 @@ export const injectCompressNudges = (
         }
     }
 
-    applyAnchoredNudges(state, config, messages, prompts, compressionPriorities)
-
     if (anchorsChanged) {
         void saveSessionState(state, logger)
     }
+
+    return renderCompressNudge(state, config, messages, prompts, compressionPriorities)
 }
 
 export const injectMessageIds = (

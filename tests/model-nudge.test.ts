@@ -9,7 +9,7 @@ import { MODEL_SELECTION_INSTRUCTIONS } from "../lib/compress/model"
 import { createCompressRangeTool } from "../lib/compress/range"
 import type { ToolContext } from "../lib/compress/types"
 import { Logger } from "../lib/logger"
-import { injectCompressNudges } from "../lib/messages/inject/inject"
+import { compressNudge } from "../lib/messages/inject/inject"
 import {
     CONTEXT_LIMIT_NUDGE,
     MODEL_SELECTION_CONTEXT_LIMIT_NUDGE,
@@ -118,9 +118,13 @@ test("configured default reaches the real context-limit injection", () => {
     const prompts = store(false, true)
     const { state, config, messages } = sessionFixture(true)
 
-    injectCompressNudges(state, config, new Logger(false), messages, prompts.getRuntimePrompts())
-
-    const injected = JSON.stringify(messages)
+    const injected = compressNudge(
+        state,
+        config,
+        new Logger(false),
+        messages,
+        prompts.getRuntimePrompts(),
+    )
     assert.match(injected, /COMPRESS AT A SAFE BOUNDARY/)
     assert.match(injected, /preserved by the configured summarizer/)
     assert.match(injected, /you MUST call the compress tool before continuing/)
@@ -192,8 +196,7 @@ test("unconfigured mode keeps the existing nudge and injection unchanged", () =>
     assert.match(runtime.contextLimitNudge, /You MUST use the .compress. tool now/)
 
     const { state, config, messages } = sessionFixture(false)
-    injectCompressNudges(state, config, new Logger(false), messages, runtime)
-    const injected = JSON.stringify(messages)
+    const injected = compressNudge(state, config, new Logger(false), messages, runtime)
     assert.match(injected, /MAX CONTEXT LIMIT REACHED/)
     assert.match(injected, /include each required placeholder exactly once in the summary/)
     assert.doesNotMatch(injected, /preserved by the configured summarizer/)

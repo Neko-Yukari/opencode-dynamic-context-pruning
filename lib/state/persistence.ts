@@ -10,7 +10,6 @@ import { homedir } from "os"
 import { join } from "path"
 import type {
     CompressionBlock,
-    PendingAutoFoldNotice,
     PreparedAutoFold,
     PrunedMessageEntry,
     SessionState,
@@ -54,10 +53,6 @@ export interface PersistedSessionState {
     lastCompaction?: number
     /** Summarized auto-fold waiting for the next request after a restart. */
     autoFold?: PreparedAutoFold | null
-    /** Completion notice for a committed fold, not yet shown in chat. */
-    autoFoldNotice?: PendingAutoFoldNotice | null
-    /** User message carrying the pending notice, until it is durable. */
-    autoFoldNoticeAttachedTo?: string | null
     /** Real user message whose auto-fold was committed (dedupes repeat events). */
     autoFoldAnnouncedFor?: string | null
 }
@@ -78,21 +73,55 @@ function getSessionFilePath(sessionId: string): string {
     return join(STORAGE_DIR, `${sessionId}.json`)
 }
 
+const pendingWrites = new Map<string, Promise<void>>()
+
+/** Wait for every in-flight state write, e.g. before the plugin is disposed. */
+export async function flushSessionWrites(): Promise<void> {
+    await Promise.allSettled([...pendingWrites.values()])
+}
+
+// Windows briefly locks a freshly written file (antivirus, indexer), and a
+// rename onto it then fails with EPERM/EBUSY. Retry for a bounded time, like
+// graceful-fs does; any other error, or a lock that persists, still surfaces.
+async function renameWithRetry(from: string, to: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await fs.rename(from, to)
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code
+            if (attempt >= 10 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES"))
+                throw error
+            await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)))
+        }
+    }
+}
+
 async function writePersistedSessionState(
     sessionId: string,
     state: PersistedSessionState,
     logger: Logger,
 ): Promise<void> {
-    await ensureStorageDir()
-
     const filePath = getSessionFilePath(sessionId)
     const content = JSON.stringify(state, null, 2)
-    const temporary = `${filePath}.${process.pid}.tmp`
+    // Saves of one session can overlap (fire-and-forget nudge anchors next to an
+    // awaited save). Serialize them per file: on Windows two renames onto the same
+    // target fail with EPERM. Registered synchronously so a flush sees it.
+    const previous = pendingWrites.get(filePath) ?? Promise.resolve()
+    const write = previous.catch(() => {}).then(async () => {
+        await ensureStorageDir()
+        const temporary = `${filePath}.${process.pid}.tmp`
+        try {
+            await fs.writeFile(temporary, content, "utf-8")
+            await renameWithRetry(temporary, filePath)
+        } finally {
+            await fs.rm(temporary, { force: true })
+        }
+    })
+    pendingWrites.set(filePath, write)
     try {
-        await fs.writeFile(temporary, content, "utf-8")
-        await fs.rename(temporary, filePath)
+        await write
     } finally {
-        await fs.rm(temporary, { force: true })
+        if (pendingWrites.get(filePath) === write) pendingWrites.delete(filePath)
     }
 
     logger.info("Saved session state to disk", {
@@ -123,8 +152,6 @@ export async function saveSessionState(
         messageIds: serializeMessageIdState(sessionState),
         lastCompaction: sessionState.lastCompaction,
         autoFold: sessionState.preparedAutoFold ?? null,
-        autoFoldNotice: sessionState.pendingAutoFoldNotice ?? null,
-        autoFoldNoticeAttachedTo: sessionState.autoFoldNoticeAttachedTo ?? null,
         autoFoldAnnouncedFor: sessionState.autoFoldAnnouncedFor ?? null,
         lastUpdated: new Date().toISOString(),
     }

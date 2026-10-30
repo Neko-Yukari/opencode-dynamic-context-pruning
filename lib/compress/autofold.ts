@@ -69,41 +69,20 @@ export interface AutoFoldInput {
     sessionID: string
     /** Messages representing the current context; used for token accounting only. */
     messages: WithParts[]
-    /**
-     * Retained so existing callers keep compiling. The completion statement is
-     * attached to the next user message; nothing is sent as host input here.
-     */
-    notify?: AutoFoldNotify
     /** Host event that started this prepare pass; named in the log line. */
     trigger?: string
 }
 
-/**
- * A committed fold is reported once by prepending its statement to the next real
- * user message. The statement waits on the session state (`pendingAutoFoldNotice`)
- * and the prompt hook adds it before admission, so it shares that message's
- * submission instead of creating a notice of its own.
- */
-export const AUTO_FOLD_NOTICE_LABEL = "自动压缩"
-export const AUTO_FOLD_DONE_NOTICE = `${AUTO_FOLD_NOTICE_LABEL}完成`
-export const AUTO_FOLD_NOTICE_PREFIX = "自动压缩已应用："
-const AUTO_FOLD_NOTICE_SOURCE = "dcp.autofold"
-/** Longest content title in the completion statement. */
+// A committed fold is reported only in the log. Any text added to the
+// conversation (user message, synthetic input) enters the model's context and
+// invites a reply, so nothing about the fold itself is shown to the model.
+/** Longest content title in the log line. */
 const AUTO_FOLD_TOPIC_LIMIT = 40
 // A prepared fold is only useful for the request that follows its turn. Anything
 // older is abandoned instead of resurrecting an unrelated summary after a restart.
 const PREPARED_FOLD_TTL_MS = 30 * 60_000
 /** Gap above the target used when no explicit `triggerTokens` is configured. */
 const AUTO_FOLD_TRIGGER_SLACK = 4_096
-
-export interface AutoFoldNotice {
-    sessionID: string
-    text: string
-    description: string
-    metadata: Record<string, string>
-}
-
-export type AutoFoldNotify = (notice: AutoFoldNotice) => Promise<unknown>
 
 // Overlapping ticks for one session must not fold twice: a prepare is guarded by
 // its own in-flight set and a projection by its own, so an in-flight summarizer
@@ -177,10 +156,9 @@ function topicLine(raw: string): string {
 }
 
 /**
- * The end caption names what the fold was about, so a chat reader can tell one
- * fold from the next. The subject comes from the summary that was actually
- * substituted, cut to a title length; the token/message scale stays in the
- * notice body. Host/path metadata and empty lines are skipped, not rendered.
+ * Names what the fold was about, so one log line can be told from the next. The
+ * subject comes from the summary that was actually substituted, cut to a title
+ * length. Host/path metadata and empty lines are skipped, not rendered.
  */
 export function autoFoldTopic(ranges: Array<{ body: string }>): string {
     for (const range of ranges) {
@@ -193,25 +171,6 @@ export function autoFoldTopic(ranges: Array<{ body: string }>): string {
         }
     }
     return ""
-}
-
-/** The visible end caption: completion plus the subject of what was folded. */
-export function formatAutoFoldEndDescription(ranges: Array<{ body: string }>): string {
-    const topic = autoFoldTopic(ranges)
-    return topic ? `${AUTO_FOLD_DONE_NOTICE}：${topic}` : AUTO_FOLD_DONE_NOTICE
-}
-
-/** The end notice: the fold's subject, then its scale. */
-export function formatAutoFoldEndNotice(input: {
-    beforeTokens: number
-    afterTokens: number
-    compressedMessages: number
-    segments: number
-    ranges: Array<{ body: string }>
-}): string {
-    const topic = autoFoldTopic(input.ranges)
-    const scale = `${formatTokens(input.beforeTokens)} → ${formatTokens(input.afterTokens)}，折叠 ${input.compressedMessages} 条消息（${input.segments} 段）`
-    return `${AUTO_FOLD_NOTICE_PREFIX}${topic ? `${topic}｜` : ""}${scale}`
 }
 
 function hasOpenToolCall(message: WithParts): boolean {
@@ -610,8 +569,6 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         }
 
         // Everything below spends a model call, so the fold genuinely starts here.
-        // The start is not announced: only a committed fold produces a statement,
-        // and that statement is attached to the next user message.
         const signal = new AbortController().signal
         const ranges: PreparedAutoFoldRange[] = []
         let compressedTokens = 0
@@ -820,27 +777,14 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
             0,
         )
 
-        // The fold is committed; hold its statement for the next user message. A
-        // separate synthetic admission here would be input of its own and can
-        // cost an extra model step after this one.
         const restoredTokens = prepared.ranges.reduce((total, range) => total + estimate(range.body), 0)
-        const afterTokens = Math.max(0, contextTokens - compressedTokens + restoredTokens)
-        ctx.state.pendingAutoFoldNotice = {
-            text: formatAutoFoldEndNotice({
-                beforeTokens: contextTokens,
-                afterTokens,
-                compressedMessages: result.totalCompressedMessages,
-                segments: result.blockIds.length,
-                ranges: prepared.ranges,
-            }),
-            description: formatAutoFoldEndDescription(prepared.ranges),
-            metadata: { source: AUTO_FOLD_NOTICE_SOURCE, event: "end" },
-        }
         ctx.state.autoFoldAnnouncedFor = owner.info.id
         await saveSessionState(ctx.state, ctx.logger)
 
         ctx.logger.info("DCP auto-fold applied", {
+            topic: autoFoldTopic(prepared.ranges),
             contextTokens,
+            afterTokens: Math.max(0, contextTokens - compressedTokens + restoredTokens),
             targetTokens: autoFold.targetTokens,
             blockIds: result.blockIds,
             compressedMessages: result.totalCompressedMessages,

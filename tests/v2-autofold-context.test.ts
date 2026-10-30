@@ -6,12 +6,12 @@ import { join } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 
 /**
- * The prompt hook is shared by every session in the process. Drive the real
- * setup hooks for two interleaved sessions and prove that each state's pending
- * completion statement is attached only to its own next prompt, including after
- * a persisted reload.
+ * Drive the real setup hooks: a fold committed between turns reaches the next
+ * request only as its summary block. Nothing is attached to the user's prompt,
+ * no fold statement enters the context, sessions never see each other's blocks,
+ * and repeating the request yields byte-identical messages (stable cache prefix).
  */
-test("interleaved sessions attach only their own completion statement", async () => {
+test("a committed fold reaches the next request only as its own summary block", async () => {
     const root = await mkdtemp(join(tmpdir(), "dcp-notice-isolation-"))
     const configHome = join(root, "config")
     const dataHome = join(root, "data")
@@ -125,104 +125,50 @@ test("interleaved sessions attach only their own completion statement", async ()
         const cleanup = await setup(makeContext())
         assert.equal(typeof cleanup, "function")
 
-        // Prepare and commit both sessions before either prompt arrives.
-        await hooks.get("experimental.idle")!({ sessionID: "ses_alpha", background: [] })
-        await hooks.get("experimental.idle")!({ sessionID: "ses_beta", background: [] })
-        await hooks.get("experimental.idle")!({ sessionID: "ses_child", background: [] })
+        // The fold statement is no longer attached to user prompts.
+        assert.equal(hooks.has("prompt"), false)
 
-        const alpha = {
-            sessionID: "ses_alpha",
-            messageID: "msg_alpha_next",
-            prompt: { text: "继续 A" },
-            delivery: "steer",
+        // Prepare and commit every session between turns.
+        for (const sessionID of sessions.keys())
+            await hooks.get("experimental.idle")!({ sessionID, background: [] })
+
+        const request = async (sessionID: string) => {
+            const event = {
+                sessionID,
+                agent: "build",
+                model: { providerID: "test", id: "model" },
+                system: [{ type: "text", text: "host system" }],
+                tools: {},
+                messages: native(sessions.get(sessionID)!),
+            }
+            await hooks.get("context")!(event)
+            return event
         }
-        await hooks.get("prompt")!(alpha)
-        const beta = {
-            sessionID: "ses_beta",
-            messageID: "msg_beta_next",
-            prompt: { text: "继续 B" },
-            delivery: "steer",
+
+        for (const [sessionID, marker] of markers) {
+            const first = await request(sessionID)
+            const text = JSON.stringify(first.messages)
+            assert.match(text, /\[Compressed conversation section\]/)
+            assert.match(text, /Read-only history inserted by the context manager/)
+            assert.match(text, new RegExp(`${marker} 主题`))
+            for (const [, other] of markers)
+                if (other !== marker) assert.equal(text.includes(`${other} 主题`), false)
+            assert.equal(text.includes("自动压缩"), false)
+            assert.equal(text.includes("dcp-nudge"), false)
+            // The newest user message is passed through as the user wrote it.
+            const lastUser = first.messages.findLast((message: any) => message.role === "user")!
+            assert.match(lastUser.content[0].text, new RegExp(`^${marker} user 3`))
+            // Auto-fold mode replaces the long manual-compression guidance.
+            const system = first.system.map((part: { text: string }) => part.text).join("\n")
+            assert.match(system, /Context is managed automatically/)
+            assert.equal(system.includes("COMPRESS WHEN"), false)
+
+            const second = await request(sessionID)
+            assert.deepEqual(second.messages, first.messages)
+            assert.deepEqual(second.system, first.system)
         }
-        await hooks.get("prompt")!(beta)
-
-        assert.match(alpha.prompt.text, /^自动压缩已应用：ALPHA 主题｜/)
-        assert.equal(alpha.prompt.text.includes("BETA"), false)
-        assert.match(beta.prompt.text, /^自动压缩已应用：BETA 主题｜/)
-        assert.equal(beta.prompt.text.includes("ALPHA"), false)
-
-        const child = {
-            sessionID: "ses_child",
-            messageID: "msg_child_next",
-            prompt: { text: "继续 child" },
-            delivery: "steer",
-        }
-        await hooks.get("prompt")!(child)
-        assert.match(child.prompt.text, /^自动压缩已应用：CHILD 主题｜/)
-        assert.equal(child.prompt.text.includes("ALPHA"), false)
-        assert.equal(child.prompt.text.includes("BETA"), false)
-
-        // Alpha's message becoming durable consumes only Alpha's statement.
-        sessions.get("ses_alpha")!.push({
-            type: "user",
-            id: "msg_alpha_next",
-            text: alpha.prompt.text,
-            time: { created: 100 },
-            agent: "build",
-            model: { providerID: "test", id: "model" },
-        })
-        await hooks.get("context")!({
-            sessionID: "ses_alpha",
-            agent: "build",
-            model: { providerID: "test", id: "model" },
-            system: [],
-            tools: {},
-            messages: [],
-        })
 
         if (typeof cleanup === "function") await cleanup()
-
-        // A fresh setup (new sessions map) rehydrates the persisted state.
-        const hooksAfterReload = new Map<string, (event: any) => unknown>()
-        const contextAfterReload = makeContext() as any
-        contextAfterReload.session.hook = async (
-            name: string,
-            callback: (event: any) => unknown,
-        ) => {
-            hooksAfterReload.set(name, callback)
-            return { dispose: async () => {} }
-        }
-        const cleanupAfterReload = await setup(contextAfterReload)
-        const alphaAfter = {
-            sessionID: "ses_alpha",
-            messageID: "msg_alpha_again",
-            prompt: { text: "再看 A" },
-            delivery: "steer",
-        }
-        await hooksAfterReload.get("prompt")!(alphaAfter)
-        assert.equal(alphaAfter.prompt.text, "再看 A")
-
-        const betaAfter = {
-            sessionID: "ses_beta",
-            messageID: "msg_beta_again",
-            prompt: { text: "再看 B" },
-            delivery: "steer",
-        }
-        await hooksAfterReload.get("prompt")!(betaAfter)
-        assert.match(betaAfter.prompt.text, /^自动压缩已应用：BETA 主题｜/)
-        assert.equal(betaAfter.prompt.text.includes("ALPHA"), false)
-
-        const childAfter = {
-            sessionID: "ses_child",
-            messageID: "msg_child_again",
-            prompt: { text: "再看 child" },
-            delivery: "steer",
-        }
-        await hooksAfterReload.get("prompt")!(childAfter)
-        assert.match(childAfter.prompt.text, /^自动压缩已应用：CHILD 主题｜/)
-        assert.equal(childAfter.prompt.text.includes("ALPHA"), false)
-        assert.equal(childAfter.prompt.text.includes("BETA"), false)
-
-        if (typeof cleanupAfterReload === "function") await cleanupAfterReload()
     } finally {
         if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
         else process.env.XDG_CONFIG_HOME = previousConfigHome
@@ -231,6 +177,14 @@ test("interleaved sessions attach only their own completion statement", async ()
         await rm(root, { recursive: true, force: true })
     }
 })
+
+function native(entries: any[]) {
+    return entries.map((entry) => ({
+        id: entry.id,
+        role: entry.type,
+        content: entry.type === "user" ? [{ type: "text", text: entry.text }] : entry.content,
+    }))
+}
 
 function buildHistory(sessionID: string, marker: string): any[] {
     const filler = " detail".repeat(800)

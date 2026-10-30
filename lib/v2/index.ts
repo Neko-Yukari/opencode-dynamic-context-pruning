@@ -20,7 +20,7 @@ import { applyPendingManualTrigger } from "../commands/manual"
 import {
     buildPriorityMap,
     buildToolIdList,
-    injectCompressNudges,
+    compressNudge,
     injectMessageIds,
     injectExtendedSubAgentResults,
     prune,
@@ -34,6 +34,8 @@ import { analyzeContextTokens } from "../commands/context"
 import { buildStatsReport } from "../commands/stats"
 import { rpc } from "./rpc"
 import { MODEL_SELECTION_INSTRUCTIONS } from "../compress/model"
+import { AUTO_FOLD_SYSTEM } from "../prompts/system"
+import { flushSessionWrites } from "../state/persistence"
 import { nativeToolSignal } from "./cancellation"
 import { createSummarizer } from "./summarizer"
 import { createReadbackTool } from "../readback"
@@ -43,14 +45,9 @@ import { createFullHistoryReader } from "./full-history"
 import { injectSessionNote, NOTE_INSTRUCTIONS } from "./note-context"
 import { foldPrepareTrigger } from "./fold-events"
 import { IDLE_HOOK, idleHook, registerIdlePrepare } from "./idle-hook"
-import { attachAutoFoldNotice, confirmAutoFoldNotice } from "./auto-fold-notice"
 
 // Extension point for future model-invisible V2 reports. Never use synthetic()
 // here: its text would enter the model's context, unlike V1 ignored messages.
-// Auto-fold does not use synthetic() either: its completion statement is
-// attached to the next user message, which is the only admission the host makes
-// for that turn. Text on that path must stay a statement of what happened,
-// never an instruction the model could act on.
 export async function report(logger: Logger, text: string, sessionID?: string) {
     logger.debug("V2 report (display pending)", { sessionID, text })
 }
@@ -83,7 +80,12 @@ export async function setup(ctx: Plugin.Context) {
         "compact",
         config.compress.model !== undefined,
     )
-    if (config.compress.model !== undefined) {
+    if (config.compress.autoFold?.enabled === true) {
+        // Auto-fold owns compression between turns, so the long manual-compression
+        // guidance would only invite the model to write summaries of its own.
+        const original = prompts.getRuntimePrompts.bind(prompts)
+        prompts.getRuntimePrompts = () => ({ ...original(), system: AUTO_FOLD_SYSTEM })
+    } else if (config.compress.model !== undefined) {
         // The tool contract differs, so the system prompt is replaced outright.
         // The context-limit nudge stays a PromptStore default so user overrides win.
         const original = prompts.getRuntimePrompts.bind(prompts)
@@ -186,36 +188,10 @@ export async function setup(ctx: Plugin.Context) {
     // same prepare: the host bus events (fallback) and, on OpenCode 2.2.1+, the
     // experimental.idle session hook. Repeated triggers collapse in
     // prepareAutoFold through the prepared artifact and, once committed, the
-    // anchor marker.
-    //
-    // The completion statement is prepended to the next real user message in the
-    // prompt hook, so it shares that message's admission. A synthetic row would
-    // be separate input and can be promoted as a model step of its own.
+    // anchor marker. A committed fold is reported only in the log: anything added
+    // to the conversation enters the model's context and invites a reply.
     const foldAbort = new AbortController()
     if (config.compress.autoFold?.enabled === true) {
-        await ctx.session.hook("prompt", async (event) => {
-            try {
-                const { state, messages } = await load(event.sessionID)
-                // A prompt that was already admitted but never reached a context
-                // hook still consumed its statement; clear it before attaching.
-                if (confirmAutoFoldNotice(state, messages)) await saveSessionState(state, logger)
-                const text = attachAutoFoldNotice(state, event.messageID, event.prompt.text)
-                if (text === event.prompt.text) return
-                // Persist the attachment before the host admits the message; the
-                // notice is cleared only once that message is durable.
-                await saveSessionState(state, logger)
-                event.prompt.text = text
-                logger.info("DCP auto-fold completion statement attached", {
-                    sessionID: event.sessionID,
-                    messageID: event.messageID,
-                })
-            } catch (error) {
-                logger.warn("DCP auto-fold completion statement not attached", {
-                    sessionID: event.sessionID,
-                    error: (error as Error)?.message ?? String(error),
-                })
-            }
-        })
         const prepareFold = async (sessionID: string, trigger: string, background?: boolean) => {
             try {
                 const { state, messages } = await load(sessionID)
@@ -299,10 +275,6 @@ export async function setup(ctx: Plugin.Context) {
             state.modelOutputLimit = limit?.output
             state.systemPromptTokens = countTokens(event.system.map((part) => part.text).join("\n"))
             if (kind === "context") {
-                // The prompt hook attached the completion statement before the
-                // host admitted the message; once it is durable here, the notice
-                // has been consumed exactly once.
-                if (confirmAutoFoldNotice(state, messages)) await saveSessionState(state, logger)
                 // Local substitution of a fold prepared after the previous turn:
                 // no model call on this path, and a missing or stale artifact only
                 // logs a reason instead of blocking the request.
@@ -334,7 +306,7 @@ export async function setup(ctx: Plugin.Context) {
             )
             const priorities = buildPriorityMap(config, state, view.messages)
             prompts.reload()
-            injectCompressNudges(
+            const nudge = compressNudge(
                 state,
                 config,
                 logger,
@@ -350,6 +322,14 @@ export async function setup(ctx: Plugin.Context) {
                 const note = await notes.get(event.sessionID)
                 event.messages = injectSessionNote(event.messages, event.sessionID, note?.content ?? "")
             }
+            // The nudge rides after the last message for this request only: it is
+            // never stored, so the cached prefix stays byte-identical.
+            if (nudge)
+                event.messages.push({
+                    id: `dcp-nudge:${event.sessionID}`,
+                    role: "user",
+                    content: [{ type: "text", text: nudge }],
+                })
             const system = { system: event.system.map((part) => part.text) }
             await createSystemPromptHandler(
                 state,
@@ -603,9 +583,10 @@ export async function setup(ctx: Plugin.Context) {
         },
     })
     logger.info("DCP V2 initialized")
-    return () => {
+    return async () => {
         foldAbort.abort()
         sessions.clear()
         limits.clear()
+        await flushSessionWrites()
     }
 }

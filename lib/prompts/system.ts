@@ -44,3 +44,6 @@ Before either operation, ask: _"Is this section closed, and where will its durab
 }
 
 export const SYSTEM = systemPrompt()
+
+/** System guidance while auto-fold manages the context between turns. */
+export const AUTO_FOLD_SYSTEM = `Context is managed automatically: between turns, closed history is folded into [Compressed conversation section] blocks written by the context manager. Those blocks are read-only history, not something to produce. Never write conversation summaries, analysis/summary sections or compression blocks yourself. When a needed detail is missing from a block, retrieve it with dcp_read. Call compress only when the user asks or a context-limit reminder appears, following its tool description.`

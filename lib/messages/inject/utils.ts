@@ -13,12 +13,6 @@ import {
     type MessagePriority,
     listPriorityRefsBeforeIndex,
 } from "../priority"
-import {
-    appendToTextPart,
-    appendToLastTextPart,
-    createSyntheticTextPart,
-    hasContent,
-} from "../utils"
 import { getLastUserMessage, isIgnoredUserMessage } from "../query"
 import { getCurrentTokenUsage } from "../../token-utils"
 import { getActiveSummaryTokenUsage } from "../../state/utils"
@@ -215,170 +209,45 @@ function buildMessagePriorityGuidance(
     return renderMessagePriorityGuidance(priorityLabel, refs)
 }
 
-function injectAnchoredNudge(message: WithParts, nudgeText: string): void {
-    if (!nudgeText.trim()) {
-        return
-    }
-
-    if (message.info.role === "user") {
-        if (appendToLastTextPart(message, nudgeText)) {
-            return
-        }
-
-        message.parts.push(createSyntheticTextPart(message, nudgeText))
-        return
-    }
-
-    if (message.info.role !== "assistant") {
-        return
-    }
-
-    if (!hasContent(message)) {
-        return
-    }
-
-    for (const part of message.parts) {
-        if (part.type === "text") {
-            if (appendToTextPart(part, nudgeText)) {
-                return
-            }
-        }
-    }
-
-    const syntheticPart = createSyntheticTextPart(message, nudgeText)
-    const firstToolIndex = message.parts.findIndex((p) => p.type === "tool")
-    if (firstToolIndex === -1) {
-        message.parts.push(syntheticPart)
-    } else {
-        message.parts.splice(firstToolIndex, 0, syntheticPart)
-    }
+/** Wrap bare nudge text so it reads as environment metadata, never as a turn. */
+function wrapReminder(text: string): string {
+    const trimmed = text.trim()
+    if (!trimmed || trimmed.includes("</dcp-system-reminder>")) return trimmed
+    return `<dcp-system-reminder>\n${trimmed}\n</dcp-system-reminder>`
 }
 
-function collectAnchoredMessages(
-    anchorMessageIds: Set<string>,
-    messages: WithParts[],
-): Array<{ message: WithParts; index: number }> {
-    const anchoredMessages: Array<{ message: WithParts; index: number }> = []
-
-    for (const anchorMessageId of anchorMessageIds) {
-        const index = messages.findIndex((message) => message.info.id === anchorMessageId)
-        if (index === -1) {
-            continue
-        }
-
-        anchoredMessages.push({
-            message: messages[index],
-            index,
-        })
-    }
-
-    return anchoredMessages
-}
-
-function collectTurnNudgeAnchors(
-    state: SessionState,
-    config: PluginConfig,
-    messages: WithParts[],
-): Set<string> {
-    const turnNudgeAnchors = new Set<string>()
-    const targetRole = config.compress.nudgeForce === "strong" ? "user" : "assistant"
-
-    for (const message of messages) {
-        if (!state.nudges.turnNudgeAnchors.has(message.info.id)) continue
-
-        if (message.info.role === targetRole) {
-            turnNudgeAnchors.add(message.info.id)
-        }
-    }
-
-    return turnNudgeAnchors
-}
-
-function applyRangeModeAnchoredNudge(
-    anchorMessageIds: Set<string>,
-    messages: WithParts[],
-    baseNudgeText: string,
-    compressedBlockGuidance: string,
-): void {
-    const nudgeText = appendGuidanceToDcpTag(baseNudgeText, compressedBlockGuidance)
-    if (!nudgeText.trim()) {
-        return
-    }
-
-    for (const { message } of collectAnchoredMessages(anchorMessageIds, messages)) {
-        injectAnchoredNudge(message, nudgeText)
-    }
-}
-
-function applyMessageModeAnchoredNudge(
-    anchorMessageIds: Set<string>,
-    messages: WithParts[],
-    baseNudgeText: string,
-    compressionPriorities?: CompressionPriorityMap,
-): void {
-    for (const { message, index } of collectAnchoredMessages(anchorMessageIds, messages)) {
-        const priorityGuidance = buildMessagePriorityGuidance(
-            messages,
-            compressionPriorities,
-            index,
-            MESSAGE_MODE_NUDGE_PRIORITY,
-        )
-        const nudgeText = appendGuidanceToDcpTag(baseNudgeText, priorityGuidance)
-        injectAnchoredNudge(message, nudgeText)
-    }
-}
-
-export function applyAnchoredNudges(
+/**
+ * The nudge for this request, or "" when the latest message carries no anchor.
+ * Only the newest message can trigger it: historical anchors are never replayed,
+ * so nothing in the cached prefix changes when blocks or anchors change.
+ */
+export function renderCompressNudge(
     state: SessionState,
     config: PluginConfig,
     messages: WithParts[],
     prompts: RuntimePrompts,
     compressionPriorities?: CompressionPriorityMap,
-): void {
-    const turnNudgeAnchors = collectTurnNudgeAnchors(state, config, messages)
-
-    if (config.compress.mode === "message") {
-        applyMessageModeAnchoredNudge(
-            state.nudges.contextLimitAnchors,
-            messages,
-            prompts.contextLimitNudge,
-            compressionPriorities,
-        )
-        applyMessageModeAnchoredNudge(
-            turnNudgeAnchors,
-            messages,
-            prompts.turnNudge,
-            compressionPriorities,
-        )
-        applyMessageModeAnchoredNudge(
-            state.nudges.iterationNudgeAnchors,
-            messages,
-            prompts.iterationNudge,
-            compressionPriorities,
-        )
-        return
-    }
-
-    const compressedBlockGuidance = buildCompressedBlockGuidance(
-        state,
-        config.compress.model !== undefined,
-    )
-    applyRangeModeAnchoredNudge(
-        state.nudges.contextLimitAnchors,
-        messages,
-        prompts.contextLimitNudge,
-        compressedBlockGuidance,
-    )
-    applyRangeModeAnchoredNudge(
-        turnNudgeAnchors,
-        messages,
-        prompts.turnNudge,
-        compressedBlockGuidance,
-    )
-    applyRangeModeAnchoredNudge(
-        state.nudges.iterationNudgeAnchors,
-        messages,
-        prompts.iterationNudge,
-        compressedBlockGuidance,
-    )
+): string {
+    const last = findLastNonIgnoredMessage(messages)
+    if (!last) return ""
+    const id = last.message.info.id
+    const base = state.nudges.contextLimitAnchors.has(id)
+        ? prompts.contextLimitNudge
+        : state.nudges.iterationNudgeAnchors.has(id)
+          ? prompts.iterationNudge
+          : state.nudges.turnNudgeAnchors.has(id)
+            ? prompts.turnNudge
+            : ""
+    const nudge = wrapReminder(base)
+    if (!nudge) return ""
+    const guidance =
+        config.compress.mode === "message"
+            ? buildMessagePriorityGuidance(
+                  messages,
+                  compressionPriorities,
+                  last.index,
+                  MESSAGE_MODE_NUDGE_PRIORITY,
+              )
+            : buildCompressedBlockGuidance(state, config.compress.model !== undefined)
+    return appendGuidanceToDcpTag(nudge, guidance)
 }

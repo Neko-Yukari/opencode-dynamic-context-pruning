@@ -1,6 +1,6 @@
 export { prune } from "./prune"
 export { syncCompressionBlocks } from "./sync"
-export { injectCompressNudges } from "./inject/inject"
+export { compressNudge } from "./inject/inject"
 export { injectMessageIds } from "./inject/inject"
 export { injectExtendedSubAgentResults } from "./inject/subagent-results"
 export { stripStaleMetadata } from "./reasoning-strip"

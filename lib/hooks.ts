@@ -5,7 +5,7 @@ import { assignMessageRefs } from "./message-ids"
 import {
     buildPriorityMap,
     buildToolIdList,
-    injectCompressNudges,
+    compressNudge,
     injectExtendedSubAgentResults,
     injectMessageIds,
     prune,
@@ -14,6 +14,8 @@ import {
     stripStaleMetadata,
     syncCompressionBlocks,
 } from "./messages"
+import { getLastUserMessage } from "./messages/query"
+import { createSyntheticUserMessage } from "./messages/utils"
 import { renderSystemPrompt, type PromptStore } from "./prompts"
 import { buildProtectedToolsExtension } from "./prompts/extensions/system"
 import {
@@ -154,7 +156,7 @@ export function createChatMessageTransformHandler(
         )
         const compressionPriorities = buildPriorityMap(config, state, output.messages)
         prompts.reload()
-        injectCompressNudges(
+        const nudge = compressNudge(
             state,
             config,
             logger,
@@ -163,6 +165,10 @@ export function createChatMessageTransformHandler(
             compressionPriorities,
         )
         injectMessageIds(state, config, output.messages, compressionPriorities)
+        // Appended last and never stored, so the cached prefix is untouched.
+        const nudgeBase = getLastUserMessage(output.messages)
+        if (nudge && nudgeBase)
+            output.messages.push(createSyntheticUserMessage(nudgeBase, nudge, "dcp-nudge"))
         applyPendingManualTrigger(state, output.messages, logger)
         stripStaleMetadata(output.messages)
 

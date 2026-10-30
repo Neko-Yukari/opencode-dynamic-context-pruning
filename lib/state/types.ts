@@ -109,13 +109,6 @@ export interface PendingManualTrigger {
     prompt: string
 }
 
-/** Chat notice for a committed fold, held until the next steer prompt carries it. */
-export interface PendingAutoFoldNotice {
-    text: string
-    description: string
-    metadata: Record<string, string>
-}
-
 export interface MessageIdState {
     byRawId: Map<string, string>
     byRef: Map<string, string>
@@ -150,10 +143,6 @@ export interface SessionState {
     systemPromptTokens: number | undefined
     /** Summarized fold waiting for the next request hook; consumed at most once. */
     preparedAutoFold: PreparedAutoFold | null
-    /** Completion notice for a committed fold, flushed at the next steer prompt. */
-    pendingAutoFoldNotice: PendingAutoFoldNotice | null
-    /** User message the pending notice was attached to, cleared once it is durable. */
-    autoFoldNoticeAttachedTo: string | null
     /**
      * Real user message whose auto-fold was committed. Also written by older
      * versions for the removed start notice, so an old marker only skips one turn.

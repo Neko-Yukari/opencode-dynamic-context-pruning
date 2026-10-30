@@ -4,7 +4,23 @@ import type { AppliedCompressionResult, CompressionStateInput, SelectionResoluti
 
 export const COMPRESSED_BLOCK_HEADER = "[Compressed conversation section]"
 export const COMPRESSED_BLOCK_TITLE_PREFIX = "Title: "
+export const COMPRESSED_BLOCK_NOTE =
+    "Read-only history inserted by the context manager. Do not imitate this format or write summaries of your own."
 const TITLE_MAX_CHARS = 120
+
+/**
+ * Add the read-only note under the header (and title) when a block is rendered.
+ * Done at render time so stored blocks gain it too; the result is deterministic,
+ * so a block renders byte-identically on every request.
+ */
+export function withCompressedBlockNote(summary: string): string {
+    if (!summary.startsWith(COMPRESSED_BLOCK_HEADER) || summary.includes(COMPRESSED_BLOCK_NOTE))
+        return summary
+    const lines = summary.split("\n")
+    const at = lines[1]?.startsWith(COMPRESSED_BLOCK_TITLE_PREFIX) ? 2 : 1
+    lines.splice(at, 0, COMPRESSED_BLOCK_NOTE)
+    return lines.join("\n")
+}
 
 // Titles are rendered into model-visible context, so keep them a single short
 // line: no newlines, no repeated whitespace, no unbounded length.
