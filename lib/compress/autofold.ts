@@ -521,12 +521,6 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
         if (!owner) {
             return { prepared: false, reason: "no-safe-range", contextTokens }
         }
-        // The artifact is consumed as soon as it is committed, so the anchor
-        // marker is what keeps repeated terminal events for one turn from
-        // spending a second summarizer call.
-        if (ctx.state.autoFoldAnnouncedFor === owner.info.id) {
-            return { prepared: false, reason: "already-prepared", contextTokens }
-        }
         // Repeated terminal events for the same turn must not summarize twice.
         const existing = ctx.state.preparedAutoFold
         if (
@@ -544,6 +538,23 @@ async function runPrepareAutoFold(input: AutoFoldInput): Promise<AutoFoldPrepare
             keepRecentMessages: autoFold.keepRecentMessages,
             neededTokens,
         })
+        // A committed fold already covers everything foldable up to its watermark.
+        // Only a later step, which adds foldable messages past it, may fold again.
+        const folded = ctx.state.autoFoldFoldedThrough
+        if (folded !== null) {
+            const order = new Map(rawMessages.map((message, index) => [message.info.id, index]))
+            const watermark = order.get(folded)
+            if (
+                watermark !== undefined &&
+                runs.every((run) => {
+                    // A run carries message refs; the watermark is a raw message id.
+                    const raw = ctx.state.messageIds.byRef.get(run.endId)
+                    return (raw === undefined ? -1 : (order.get(raw) ?? -1)) <= watermark
+                })
+            ) {
+                return { prepared: false, reason: "already-prepared", contextTokens }
+            }
+        }
         const selectedTokens = runs.reduce((total, run) => total + run.tokens, 0)
         // A fold that cannot outweigh the smallest possible summary would grow the
         // context instead of shrinking it, and a fold below the configured floor is
@@ -778,7 +789,12 @@ export async function projectAutoFold(input: AutoFoldInput): Promise<AutoFoldPro
         )
 
         const restoredTokens = prepared.ranges.reduce((total, range) => total + estimate(range.body), 0)
-        ctx.state.autoFoldAnnouncedFor = owner.info.id
+        // The watermark is the last message this fold covered; a later step in the
+        // same turn lands past it and is allowed to fold again.
+        const order = new Map(rawMessages.map((message, index) => [message.info.id, index]))
+        ctx.state.autoFoldFoldedThrough = prepared.ranges
+            .flatMap((range) => range.messageIds)
+            .reduce((latest, id) => ((order.get(id) ?? -1) > (order.get(latest) ?? -1) ? id : latest))
         await saveSessionState(ctx.state, ctx.logger)
 
         ctx.logger.info("DCP auto-fold applied", {

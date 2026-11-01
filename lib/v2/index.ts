@@ -183,13 +183,16 @@ export async function setup(ctx: Plugin.Context) {
             )
     }
 
-    // Auto-fold prepare runs after the turn ends, never inside a request. The
-    // context hook below only projects what this prepared. Two paths reach the
-    // same prepare: the host bus events (fallback) and, on OpenCode 2.2.1+, the
-    // experimental.idle session hook. Repeated triggers collapse in
-    // prepareAutoFold through the prepared artifact and, once committed, the
-    // anchor marker. A committed fold is reported only in the log: anything added
-    // to the conversation enters the model's context and invites a reply.
+    // Auto-fold prepare runs outside a request, never inside one. The context
+    // hook below only projects what this prepared. Bus events reach it after
+    // every finished step (`session.step.*`), so a long agentic turn folds
+    // between steps instead of waiting for its end; turn-end and experimental.idle
+    // events stay as the fallback for turns that end without a step event. Repeated
+    // triggers collapse in prepareAutoFold through the prepared artifact and, once
+    // committed, the fold watermark: an event that adds no foldable message finds
+    // the watermark already covering the history. A committed fold is reported only
+    // in the log: anything added to the conversation enters the model's context and
+    // invites a reply.
     const foldAbort = new AbortController()
     if (config.compress.autoFold?.enabled === true) {
         const prepareFold = async (sessionID: string, trigger: string, background?: boolean) => {

@@ -53,8 +53,8 @@ export interface PersistedSessionState {
     lastCompaction?: number
     /** Summarized auto-fold waiting for the next request after a restart. */
     autoFold?: PreparedAutoFold | null
-    /** Real user message whose auto-fold was committed (dedupes repeat events). */
-    autoFoldAnnouncedFor?: string | null
+    /** Last message covered by a committed auto-fold; dedupes repeat events. */
+    autoFoldFoldedThrough?: string | null
 }
 
 const STORAGE_DIR = join(
@@ -152,7 +152,7 @@ export async function saveSessionState(
         messageIds: serializeMessageIdState(sessionState),
         lastCompaction: sessionState.lastCompaction,
         autoFold: sessionState.preparedAutoFold ?? null,
-        autoFoldAnnouncedFor: sessionState.autoFoldAnnouncedFor ?? null,
+        autoFoldFoldedThrough: sessionState.autoFoldFoldedThrough ?? null,
         lastUpdated: new Date().toISOString(),
     }
     await writePersistedSessionState(sessionState.sessionId, state, logger)

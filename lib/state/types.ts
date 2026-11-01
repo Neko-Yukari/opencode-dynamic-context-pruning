@@ -144,10 +144,10 @@ export interface SessionState {
     /** Summarized fold waiting for the next request hook; consumed at most once. */
     preparedAutoFold: PreparedAutoFold | null
     /**
-     * Real user message whose auto-fold was committed. Also written by older
-     * versions for the removed start notice, so an old marker only skips one turn.
-     * The artifact is consumed at commit, so this is what dedupes a repeated
-     * terminal event for the same turn.
+     * Last message covered by a committed auto-fold. A prepare that finds no
+     * foldable message past this watermark is a repeat of the same terminal
+     * event; anything newer, including a later step of the same turn, may fold
+     * again.
      */
-    autoFoldAnnouncedFor: string | null
+    autoFoldFoldedThrough: string | null
 }

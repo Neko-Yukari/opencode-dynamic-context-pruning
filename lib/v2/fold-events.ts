@@ -1,13 +1,17 @@
 /**
  * Which host events may start an auto-fold prepare pass.
  *
- * A prepare spends a summarizer call, so it happens only outside a request:
- * after a finished turn (`session.execution.*`) or when the session falls idle
- * (`session.idle`, including turns that end without a terminal execution event).
- * Repeated events for the same turn are collapsed by the prepared-artifact
- * anchor + TTL, not by a second state machine here.
+ * A prepare spends a summarizer call, so it happens outside a request: after a
+ * finished step (`session.step.*`, which is what lets a long agentic turn fold
+ * between steps instead of only at its end), after a finished turn
+ * (`session.execution.*`) or when the session falls idle (`session.idle`, for
+ * turns that end without a terminal execution event). Repeated events that leave
+ * the foldable history unchanged are collapsed by the fold watermark in
+ * `prepareAutoFold`, not by a second state machine here.
  */
 export const FOLD_PREPARE_EVENTS = new Set([
+    "session.step.ended",
+    "session.step.failed",
     "session.execution.succeeded",
     "session.execution.failed",
     "session.execution.interrupted",

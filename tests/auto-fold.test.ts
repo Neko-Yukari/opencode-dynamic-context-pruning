@@ -917,6 +917,62 @@ test("a committed fold is not summarized again for the same turn", async () => {
     assert.equal(counter.calls, 1)
 })
 
+test("a later step of the same turn folds again", async () => {
+    const sessionID = `ses_autofold_stepwise_${Date.now()}`
+    const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
+    const config = buildConfig()
+    config.compress.model = "test/model"
+    const counter = { calls: 0 }
+    const ctx = buildContext(sessionID, rawMessages, config, {
+        summarizer: buildSummarizer(counter),
+    })
+
+    const prepared = await prepareAutoFold({
+        ctx,
+        sessionID,
+        messages: rawMessages,
+        trigger: "session.step.ended",
+    })
+    const folded = await projectAutoFold({ ctx, sessionID, messages: rawMessages })
+
+    // The turn keeps going: later steps append messages past the fold watermark.
+    // Four more exchanges leave foldable units behind the two kept recent messages.
+    const filler = " detail".repeat(800)
+    for (let index = 100; index < 108; index++) {
+        const id = index % 2 === 0 ? `msg-user-${index}` : `msg-assistant-${index}`
+        rawMessages.push({
+            info: {
+                id,
+                role: index % 2 === 0 ? "user" : "assistant",
+                sessionID,
+                agent: "assistant",
+                time: { created: index },
+            } as WithParts["info"],
+            parts: [
+                {
+                    id: `${id}-p`,
+                    messageID: id,
+                    sessionID,
+                    type: "text",
+                    text: `Step ${index}${filler}`,
+                },
+            ],
+        } as WithParts)
+    }
+
+    const again = await prepareAutoFold({
+        ctx,
+        sessionID,
+        messages: rawMessages,
+        trigger: "session.step.ended",
+    })
+
+    assert.equal(prepared.prepared, true)
+    assert.equal(folded.folded, true)
+    assert.equal(again.prepared, true, `second prepare: ${again.reason} at ${again.contextTokens} tokens`)
+    assert.equal(counter.calls, 2)
+})
+
 test("a failed summary leaves no artifact and no notice", async () => {
     const sessionID = `ses_autofold_failnotice_${Date.now()}`
     const rawMessages = buildHistory(sessionID, fourTurns(), 5000)
@@ -1056,6 +1112,9 @@ test("session.idle starts a prepare and repeated terminal events prepare once", 
     assert.deepEqual(reasons, [undefined, "already-prepared", "already-prepared", "already-prepared"])
     // Unrelated events and other directories never start a prepare.
     assert.equal(foldPrepareTrigger({ type: "session.status", data: { sessionID } }, directory), undefined)
+    // A finished step is a prepare point too: a long agentic turn must not wait for its end.
+    assert.equal(foldPrepareTrigger({ type: "session.step.ended", data: { sessionID } }, directory), sessionID)
+    assert.equal(foldPrepareTrigger({ type: "session.step.failed", data: { sessionID } }, directory), sessionID)
     assert.equal(
         foldPrepareTrigger(
             { type: "session.idle", data: { sessionID }, location: { directory: "D:/other" } },
