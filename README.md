@@ -98,17 +98,19 @@ Native compaction starts a new host history. DCP clears its summaries, compressi
 
 Released regions stay omitted, and old block references stop working after compaction. `dcp_read` can still read originals by source message ID, and search still covers them, as long as the host retains the underlying message rows.
 
-### Automatic end-of-turn folding (OpenCode V2)
+### Automatic folding while a turn runs (OpenCode V2)
 
 `compress.autoFold` keeps a large-window model on a much smaller resident context.
-Each fold is prepared after a turn ends and only substituted when the next request
-is built, so no summarizer call sits on the request path. In the prepare step DCP
-measures the actual context tokens and, when the context is above
-`triggerTokens`, has the configured model summarize the oldest
-safe contiguous history. The folded blocks are created by the context hook from
-that prepared artifact, reusing the same internal range path as the manual
-compress tool, so block state, protection, statistics, readback and release
-behavior stay identical.
+Each fold is prepared outside a request: after every finished step (including the
+steps of one long agentic turn), after a turn ends, or when the session falls idle.
+It is substituted only when the next request is built, so no summarizer call sits on
+the request path. In the prepare step DCP measures the actual context tokens and,
+when the context is above `triggerTokens`, has the configured model summarize the
+oldest safe contiguous history. One fold per turn is not a limit: the fold watermark
+is the last message a committed fold covered, so a later step whose messages sit past
+it may fold again. The folded blocks are created by the context hook from that
+prepared artifact, reusing the same internal range path as the manual compress tool,
+so block state, protection, statistics, readback and release behavior stay identical.
 
 `targetTokens`, `triggerTokens` and `minFoldTokens` accept the same specs as
 `compress.maxContextLimit`: plain tokens (`100000`), suffixed tokens (`100k`,
